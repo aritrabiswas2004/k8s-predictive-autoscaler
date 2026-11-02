@@ -1,5 +1,5 @@
 # Build stage: compile a static binary.
-FROM golang:1.26.6 AS build
+FROM golang:1.27.3 AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
