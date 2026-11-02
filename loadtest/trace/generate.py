@@ -34,6 +34,7 @@ Stdlib only.
 
 import argparse
 import json
+import os
 import random
 from pathlib import Path
 
@@ -52,7 +53,8 @@ SHAPE = [
     (1.00, 0.0),
 ]
 
-DEFAULT_RAW = Path(__file__).parent / "raw" / "dewiki-user-hourly-2025-03-03_09.json"
+REPO = Path(__file__).resolve().parents[2]
+DEFAULT_RAW = REPO / "loadtest" / "trace" / "raw" / "dewiki-user-hourly-2025-03-03_09.json"
 
 
 def interp(points, x):
@@ -167,9 +169,7 @@ def generate(a):
         "num_cycles": a.cycles,
         "history_cycles": a.history_cycles,
         "duration_seconds": total,
-        "params": {k: v for k, v in vars(a).items() if k not in ("out", "workload")
-                   and not (a.workload == "wikipedia" and k in ("amplitude_var", "timing_var", "trend"))
-                   and not (a.workload == "synthetic" and k in ("raw", "start_hour"))},
+        "params": params(a),
         "source": meta or None,
         "cycles": cycles,
         "spike": {"start_s": sp[0], "end_s": sp[1], "extra_rps": a.spike_rps} if sp else None,
@@ -182,6 +182,17 @@ def generate(a):
         },
         "rps": rps,
     }
+
+
+def params(a):
+    """The parameters worth recording in the trace, with paths relative to the repo so the
+    file is identical on every machine."""
+    skip = {"out", "workload"}
+    skip |= {"amplitude_var", "timing_var", "trend"} if a.workload == "wikipedia" else {"raw", "start_hour"}
+    p = {k: v for k, v in vars(a).items() if k not in skip}
+    if "raw" in p:
+        p["raw"] = Path(os.path.relpath(Path(p["raw"]).resolve(), REPO)).as_posix()
+    return p
 
 
 def parse(argv=None):

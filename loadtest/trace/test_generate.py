@@ -83,6 +83,14 @@ class TraceTest(unittest.TestCase):
         self.assertEqual([c["date"] for c in t["cycles"]],
                          ["20250303", "20250304", "20250305", "20250306", "20250307"])
 
+    def test_no_machine_specific_paths(self):
+        # Traces are committed and compared in CI, so nothing may depend on where the repo is.
+        for w in ("synthetic", "wikipedia"):
+            _, t = make(w)
+            text = json.dumps(t)
+            self.assertNotIn(str(g.REPO), text, w)
+            self.assertNotIn(str(Path.home()), text, w)
+
     def test_committed_traces_are_current(self):
         # loadtest/trace/out/ must match what the generator produces now.
         out = Path(__file__).parent / "out"
