@@ -1,0 +1,269 @@
+{
+ "config": {
+  "query": "sum(rate(http_requests_received_total{app=\"web\"}[1m]))",
+  "models": [
+   "naive",
+   "holtwinters"
+  ],
+  "step_seconds": 15,
+  "cycle_seconds": 300,
+  "history_cycles": 3,
+  "min_history_cycles": 2,
+  "max_gap_steps": 2,
+  "lead_seconds": 60,
+  "window_seconds": 60,
+  "upper_quantile": 0.9,
+  "rps_per_pod": 40.0,
+  "max_replicas": 7,
+  "interval_seconds": 30.0,
+  "smape_samples": 10,
+  "query_timeout_seconds": 10.0,
+  "port": 8000
+ },
+ "simulation_vs_recorded_mean_abs_rel_diff": {
+  "synthetic-s1": 0.03306736797756975,
+  "wikipedia-s1": 0.03355267111501949
+ },
+ "summary": {
+  "simulated/synthetic/naive": {
+   "scored": {
+    "n": 55,
+    "smape": 0.2189007817582478,
+    "mase": 1.326192475921421,
+    "coverage": 0.8545454545454545,
+    "short": 0.03636363636363636,
+    "excess_pods": 0.6909090909090909,
+    "fit_ms_median": 0.042208004742860794
+   },
+   "spike": {
+    "n": 30,
+    "smape": 0.607775062699342,
+    "mase": 5.434623158361459,
+    "coverage": 0.16666666666666666,
+    "short": 0.8333333333333334,
+    "excess_pods": -1.2333333333333334,
+    "fit_ms_median": 0.04162546247243881
+   }
+  },
+  "simulated/synthetic/holtwinters": {
+   "scored": {
+    "n": 55,
+    "smape": 0.21090237032603185,
+    "mase": 1.154563595106881,
+    "coverage": 0.7454545454545455,
+    "short": 0.05454545454545454,
+    "excess_pods": 0.2909090909090909,
+    "fit_ms_median": 32.481458969414234
+   },
+   "spike": {
+    "n": 30,
+    "smape": 0.5192606134707847,
+    "mase": 4.983262313109573,
+    "coverage": 0.23333333333333334,
+    "short": 0.7,
+    "excess_pods": -1.0,
+    "fit_ms_median": 29.383938061073422
+   }
+  },
+  "simulated/synthetic/current": {
+   "scored": {
+    "n": 55,
+    "smape": 0.665344215767821,
+    "mase": 3.5693234001243446,
+    "coverage": 0.4,
+    "short": 0.41818181818181815,
+    "excess_pods": -0.36363636363636365,
+    "fit_ms_median": 0.007709022611379623
+   },
+   "spike": {
+    "n": 30,
+    "smape": 0.9386206490946123,
+    "mase": 7.390374306326961,
+    "coverage": 0.13333333333333333,
+    "short": 0.7666666666666667,
+    "excess_pods": -2.1,
+    "fit_ms_median": 0.007854541763663292
+   }
+  },
+  "simulated/wikipedia/naive": {
+   "scored": {
+    "n": 55,
+    "smape": 0.02833785355672206,
+    "mase": 0.734856059795166,
+    "coverage": 0.7818181818181819,
+    "short": 0.05454545454545454,
+    "excess_pods": 0.09090909090909091,
+    "fit_ms_median": 0.040250131860375404
+   },
+   "spike": {
+    "n": 30,
+    "smape": 0.48910263665874837,
+    "mase": 23.077489950870902,
+    "coverage": 0.13333333333333333,
+    "short": 0.8,
+    "excess_pods": -1.8333333333333333,
+    "fit_ms_median": 0.04306202754378319
+   }
+  },
+  "simulated/wikipedia/holtwinters": {
+   "scored": {
+    "n": 55,
+    "smape": 0.05851600357991943,
+    "mase": 1.5424701528529998,
+    "coverage": 0.8909090909090909,
+    "short": 0.0,
+    "excess_pods": 0.16363636363636364,
+    "fit_ms_median": 36.087875021621585
+   },
+   "spike": {
+    "n": 30,
+    "smape": 0.47296675435193136,
+    "mase": 22.725981469035407,
+    "coverage": 0.16666666666666666,
+    "short": 0.7333333333333333,
+    "excess_pods": -1.3666666666666667,
+    "fit_ms_median": 39.51460402458906
+   }
+  },
+  "simulated/wikipedia/current": {
+   "scored": {
+    "n": 55,
+    "smape": 0.4585983669231285,
+    "mase": 9.450685435762756,
+    "coverage": 0.23636363636363636,
+    "short": 0.6363636363636364,
+    "excess_pods": -0.4727272727272727,
+    "fit_ms_median": 0.0076249707490205765
+   },
+   "spike": {
+    "n": 30,
+    "smape": 0.8236558025251112,
+    "mase": 32.23492630638676,
+    "coverage": 0.1,
+    "short": 0.9,
+    "excess_pods": -2.1333333333333333,
+    "fit_ms_median": 0.007687951438128948
+   }
+  },
+  "recorded/synthetic/naive": {
+   "scored": {
+    "n": 10,
+    "smape": 0.29422176880745843,
+    "mase": 1.0318961158988602,
+    "coverage": 0.8,
+    "short": 0.0,
+    "excess_pods": 1.1,
+    "fit_ms_median": 0.039563048630952835
+   },
+   "spike": {
+    "n": 7,
+    "smape": 0.5692238760804978,
+    "mase": 3.1842509338016516,
+    "coverage": 0.2857142857142857,
+    "short": 0.7142857142857143,
+    "excess_pods": -0.7142857142857143,
+    "fit_ms_median": 0.04350021481513977
+   }
+  },
+  "recorded/synthetic/holtwinters": {
+   "scored": {
+    "n": 10,
+    "smape": 0.2912191802728056,
+    "mase": 1.2155423663846132,
+    "coverage": 0.7,
+    "short": 0.2,
+    "excess_pods": 0.6,
+    "fit_ms_median": 24.874228984117508
+   },
+   "spike": {
+    "n": 7,
+    "smape": 0.5291502778957277,
+    "mase": 3.270367449869385,
+    "coverage": 0.42857142857142855,
+    "short": 0.5714285714285714,
+    "excess_pods": -0.2857142857142857,
+    "fit_ms_median": 34.48850009590387
+   }
+  },
+  "recorded/synthetic/current": {
+   "scored": {
+    "n": 10,
+    "smape": 0.6170536778199371,
+    "mase": 2.2256143933625916,
+    "coverage": 0.4,
+    "short": 0.4,
+    "excess_pods": -0.2,
+    "fit_ms_median": 0.0074789859354496
+   },
+   "spike": {
+    "n": 7,
+    "smape": 0.9810849915503285,
+    "mase": 5.276992185256209,
+    "coverage": 0.2857142857142857,
+    "short": 0.7142857142857143,
+    "excess_pods": -1.7142857142857142,
+    "fit_ms_median": 0.008124858140945435
+   }
+  },
+  "recorded/wikipedia/naive": {
+   "scored": {
+    "n": 10,
+    "smape": 0.025321889814491554,
+    "mase": 0.5079625613335353,
+    "coverage": 0.6,
+    "short": 0.3,
+    "excess_pods": -0.1,
+    "fit_ms_median": 0.0427919439971447
+   },
+   "spike": {
+    "n": 7,
+    "smape": 0.4899999070256755,
+    "mase": 19.975142348930994,
+    "coverage": 0.0,
+    "short": 0.7142857142857143,
+    "excess_pods": -1.7142857142857142,
+    "fit_ms_median": 0.04041590727865696
+   }
+  },
+  "recorded/wikipedia/holtwinters": {
+   "scored": {
+    "n": 10,
+    "smape": 0.0702460157782146,
+    "mase": 1.7395996760246786,
+    "coverage": 0.9,
+    "short": 0.0,
+    "excess_pods": 0.2,
+    "fit_ms_median": 39.79879210237414
+   },
+   "spike": {
+    "n": 7,
+    "smape": 0.5035035331392896,
+    "mase": 21.228151969206795,
+    "coverage": 0.14285714285714285,
+    "short": 0.5714285714285714,
+    "excess_pods": -1.0,
+    "fit_ms_median": 38.641707971692085
+   }
+  },
+  "recorded/wikipedia/current": {
+   "scored": {
+    "n": 10,
+    "smape": 0.410435199310743,
+    "mase": 6.473445179519154,
+    "coverage": 0.2,
+    "short": 0.7,
+    "excess_pods": -0.6,
+    "fit_ms_median": 0.0076669966802001
+   },
+   "spike": {
+    "n": 7,
+    "smape": 0.8565943031064488,
+    "mase": 30.453650534144614,
+    "coverage": 0.2857142857142857,
+    "short": 0.7142857142857143,
+    "excess_pods": -1.4285714285714286,
+    "fit_ms_median": 0.007292022928595543
+   }
+  }
+ }
+}

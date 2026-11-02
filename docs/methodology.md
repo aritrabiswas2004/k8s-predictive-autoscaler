@@ -19,6 +19,9 @@ section.
 | `minReplicaCount` / `maxReplicaCount` | **2 / 7** | [replica bounds](#replica-bounds) |
 | Load traces | 5 cycles × 300 s (3 history, 2 scored), seeds 1–5 per workload | [load traces](#load-traces) |
 | Connections | new connection per request (`noVUConnectionReuse`) | [load generation](#load-generation-one-connection-per-request) |
+| `rate[1m]` delay | the arrival series trails real arrivals by **≈ 28 s** | [forecaster](#what-it-forecasts-and-how-far-ahead) |
+| Forecast window | peak over **[now + 60 s, now + 120 s]** (LEAD = startup delay + 30 s) | [forecaster](#what-it-forecasts-and-how-far-ahead) |
+| Forecast upper bound | one-sided **90 %** | [forecaster](#models) |
 
 ## Setup
 
@@ -300,3 +303,212 @@ VUs had neither, so the tail was mostly run-to-run noise (laptop scheduling) on 
 burstiness described above. `trace.js` now pre-allocates 200 VUs.
 
 Reproduce: `make traces`, then `make trace-check TRACE=synthetic-s1` (25 min).
+
+## Forecaster
+
+`forecaster/` (Python, deployed by `make forecaster-deploy` to the tools node). Every 30 s it:
+
+1. reads `sum(rate(http_requests_received_total{app="web"}[1m]))` from Prometheus
+   (`query_range`, 15 s steps, the last 3 cycles plus one forecast window for scoring);
+2. fits each model on up to 3 cycles (60 samples);
+3. exports the **peak over the window [now + 60 s, now + 120 s]**, both the point forecast
+   and a one-sided 90 % upper bound. KEDA scales arms C and D on the upper bound.
+
+It runs in every arm (shadow mode), and both models are exported in every run, so forecast
+quality is measured everywhere regardless of which model a scaler reads.
+
+### What it forecasts, and how far ahead
+
+**The series lags real arrivals by about 28 s.** The forecaster reads the same 1-minute rate
+as the reactive trigger. The rate at time T is the counter increase between the first and
+last 15 s scrape inside [T − 60, T], so it averages arrivals over roughly [T − 50, T − 5].
+Fitting this against the two recorded trace-check runs gives exactly that: a 45 s trailing
+mean ending 5–6 s before T matches the recorded series to within 1 %. The series therefore
+trails real arrivals by about 28 s.
+
+**The forecast path is faster than the reactive one.** From a forecast computed at t to a new
+pod serving:
+
+| segment | seconds | source |
+|---|---:|---|
+| Prometheus scrapes the forecaster | 0–15 | scrape interval |
+| HPA sync asks KEDA, which queries Prometheus | 0–15 | HPA sync period |
+| decision → new pod serving | ≈ 32 | Phase 2: 1 s scheduling and start, 30.2 s startup delay, ~1 s to serve |
+| **total** | **32–62** | |
+
+The reactive path's 60–75 s includes ~27 s for the rate to climb past the threshold. The
+forecast path skips that.
+
+**The window.** The next forecast comes 30 s later, so each forecast must cover the load
+from t + 32 s (best case) to t + 92 s (worst case, plus one interval) in real time. On the
+lagged series that is about [t + 60, t + 120]: **LEAD = 60 s, WINDOW = 60 s**. In general,
+LEAD = `STARTUP_DELAY_SECONDS` + 30 s, so the lag sweep (startup delay 0 and 60 s, Phase 6)
+uses LEAD 30 and 90 s. The end of the window matters less than its start: once the HPA has
+scaled up, its 120 s scale-down stabilization keeps the pods for two more minutes.
+
+### Models
+
+Both implement one interface (`forecaster/src/forecaster/models/`), and the service and the
+backtest call the same code (`window.predict`).
+
+- **Seasonal naive.** The point forecast is the value one cycle (300 s) earlier. The upper
+  bound adds the 90th percentile of the history's seasonal differences y[t] − y[t − 300 s],
+  i.e. of the errors this forecast made in the past. That needs two cycles of history, and
+  the bound is only ever raised, never lowered below the point forecast.
+- **Holt-Winters**: ETS(A,N,A) from statsmodels 0.15 (`ETSModel`), additive error, no trend,
+  additive seasonality with a period of 20 samples (300 s / 15 s), estimated initial states,
+  analytic prediction intervals. No trend term: three cycles are too short to estimate one,
+  and over a two-minute horizon the level update follows slow drift anyway.
+
+**Holt-Winters on three cycles** (plan: "check statsmodels copes"):
+
+- It fits without warnings. A fit takes **24–38 ms** (median per series).
+- **The fit degenerates.** Over 54 backtest fits, the optimiser always puts the level
+  smoothing at its upper bound (α = 1.0) and the seasonal smoothing at its lower bound
+  (γ ≈ 0, at most 0.0001). The 1-minute rate is smooth, so the best one-step predictor is the
+  last value, and with γ = 0 the seasonal profile stays at its initial estimate. The forecast
+  is therefore "the latest value plus the change the seasonal profile expects over the next
+  two minutes". Its intervals grow like a random walk's, from one-step residuals. Those are
+  too narrow four to nine steps ahead on an autocorrelated series, which shows up as low
+  coverage below.
+- statsmodels 0.15's `get_prediction` fails on a bare NumPy array (`'numpy.ndarray' object
+  has no attribute 'index'`), so the model passes a pandas Series.
+
+### Failure behaviour
+
+A made-up number is never exported. When the forecaster has nothing valid, the series is
+absent, so arm D's reactive trigger decides alone, and arm C falls back to KEDA's `fallback`
+(Phase 5).
+
+| situation | what is exported |
+|---|---|
+| less than 2 cycles of history, or no arrival series at all (cold start) | no `forecast_rps` for that model |
+| Prometheus query fails | the last good forecast, until its window has passed (120 s after it was made), then nothing. `forecast_last_success_timestamp_seconds` stops advancing |
+| a model's fit fails | the same, for that model only. The other model is unaffected |
+| gaps in the history | gaps of up to 2 samples are interpolated. A longer gap cuts the history there |
+| an absurd forecast | clamped to [0, 7 × 40 = 280] RPS. No lower clamp: `minReplicaCount` already sets the floor, and a floor here would hide the shape |
+
+Exported metrics: `forecast_rps{model, bound="upper"|"mean"}`,
+`forecast_last_success_timestamp_seconds{model}`, `forecast_fit_duration_seconds{model}`,
+`forecast_smape{model}` and `forecast_coverage_ratio{model}` (over the last 10 forecasts
+whose window has since been observed), `forecast_errors_total{stage, model}`,
+`forecast_history_seconds`, and the configuration (`forecast_lead_seconds`,
+`forecast_window_seconds`, `forecast_upper_quantile`). The Grafana dashboard
+"Predictive autoscaling: forecast" (`deploy/forecaster/dashboard.yaml`) plots them.
+
+### Backtest
+
+`make backtest` (`forecaster/backtest/backtest.py`) runs a rolling-origin evaluation.
+
+**Series.** Ten simulated arrival series and the two recorded ones.
+
+- **Simulated**: one per committed trace (seeds 1–5 × 2 workloads), as Prometheus would
+  record it. Poisson arrivals at the trace's rate over 7 pods, each pod's counter scraped
+  every 15 s at its own phase, read as `sum(rate(...[1m]))`. Against the two recorded runs
+  the simulation differs by 3.3 % on average (mean absolute, no bias), about the Poisson
+  noise of a 45 s count at 100 RPS.
+- **Recorded**: the series from the two trace-check runs
+  (`experiments/results/traces/check-*-s1.arrivals.json`).
+
+**Method.**
+
+- **Origins:** every 30 s through the scored cycles. At each origin a model is fitted on the
+  preceding 3 cycles and forecasts the window [origin + 60 s, origin + 120 s].
+- **Spike windows:** windows overlapping the spike (or the minute after it) are reported
+  separately.
+- **Scoring:** "peak" is the realized maximum of the series over the window. "Short" is the
+  share of windows where the upper bound implies fewer pods than the realized peak needs,
+  with pods = ceil(rps / 40) clamped to [2, 7]. "Current" is a reference rather than a model:
+  the latest value of the series, which is what a reactive scaler acts on (without its own
+  detection delay).
+
+Results (`experiments/results/backtest/`):
+
+| workload | model | windows | peak sMAPE | MASE | 90 % bound covers | short of pods | extra pods | spike windows covered |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| synthetic | seasonal naive | 55 | 21.9 % | 1.33 | 85 % | 4 % | +0.69 | 17 % of 30 |
+| synthetic | Holt-Winters | 55 | 21.1 % | 1.15 | 75 % | 5 % | +0.29 | 23 % of 30 |
+| synthetic | *current (reference)* | 55 | 66.5 % | 3.57 | 40 % | 42 % | −0.36 | 13 % of 30 |
+| Wikipedia | seasonal naive | 55 | 2.8 % | 0.73 | 78 % | 5 % | +0.09 | 13 % of 30 |
+| Wikipedia | Holt-Winters | 55 | 5.9 % | 1.54 | 89 % | 0 % | +0.16 | 17 % of 30 |
+| Wikipedia | *current (reference)* | 55 | 45.9 % | 9.45 | 24 % | 64 % | −0.47 | 10 % of 30 |
+
+*Simulated series, seeds 1–5. The recorded runs (10 windows each, `backtest.md`) agree in
+direction: synthetic sMAPE 29 % for both models, Wikipedia 2.5 % (naive) vs 7.0 %
+(Holt-Winters).*
+
+![Backtest on the recorded runs](img/backtest.png)
+
+What it shows:
+
+- **Forecasting at this lead is necessary.** Acting on the current rate would be short of
+  pods in 42 % (synthetic) and 64 % (Wikipedia) of windows, against at most 5 % for either
+  model. A reactive scaler sees the current rate later still, which is the case for
+  prediction.
+- **Synthetic: no clear winner.** Peak sMAPE is the same (21–22 %). Holt-Winters has the
+  lower MASE (1.15 vs 1.33) and costs fewer extra pods (+0.29 vs +0.69). But its "90 %" bound
+  covers only 75 % of windows (naive: 85 %), and it is short of pods about as often (5 % vs
+  4 %). Neither beats the in-sample naive error (MASE > 1). The timing and amplitude
+  variation is what makes this workload hard, by design.
+- **Wikipedia: seasonal naive wins clearly** (2.8 % vs 5.9 % sMAPE, MASE 0.73 vs 1.54). Real
+  days repeat closely, and Holt-Winters' random-walk level only adds noise to a good seasonal
+  copy.
+- **The spike is not forecast** (10–23 % of its windows covered), as designed. Afterwards
+  both models overshoot for a while: the spike has entered Holt-Winters' level and naive's
+  error quantile (visible after 1350 s in the figure).
+- **Caveat:** the 55 windows per workload come from 5 seeds with overlapping windows every
+  30 s, so they are not independent. Differences of a few percent are within noise.
+
+### Shadow-mode replay
+
+**Setup.** The deployed forecaster ran while each seed-1 trace was replayed against 7 fixed
+replicas with no scaler (`make trace-check`, results in `experiments/results/forecaster/`).
+k6 delivered both traces in full: 109,236 of 109,237 and 133,532 of 133,533 requests, none
+dropped or failed, p95 9.6 and 9.3 ms. The forecaster used about 108 MiB of memory (limit
+256 MiB) and about 0.01 CPU.
+
+**Scoring.** `experiments/analysis/forecast_shadow.py` saves the run's series from
+Prometheus (`*.series.json`, so the analysis reruns without the cluster). It then scores each
+forecast made in the scored cycles against the samples its own window covered, the same way
+as the backtest.
+
+| trace | model | windows | peak sMAPE | 90 % bound covers | short of pods | backtest, same recorded trace |
+|---|---|---:|---:|---:|---:|---:|
+| synthetic-s1 | seasonal naive | 9 | 30.3 % | 89 % | 0 % | 29.4 % |
+| synthetic-s1 | Holt-Winters | 9 | 30.8 % | 67 % | 11 % | 29.1 % |
+| wikipedia-s1 | seasonal naive | 10 | 2.5 % | 80 % | 10 % | 2.5 % |
+| wikipedia-s1 | Holt-Winters | 10 | 9.5 % | 80 % | 0 % | 7.0 % |
+
+**Result.** The live forecaster reproduces the backtest within the noise of 9–10 windows, and
+`forecast_rps` follows the load shape (below, and in the Grafana dashboard).
+
+![Live forecasts during the shadow-mode replays](img/forecast-shadow.png)
+
+Notes:
+
+- **Score on the forecaster's own grid.** The forecaster samples at multiples of 15 s since
+  the epoch, while the trace starts mid-step. Scoring a forecast against the trace-aligned
+  series, whose samples sit 5 s off, first made Wikipedia naive look twice as bad (5–7 %):
+  on the steep evening drop, a sample 5 s earlier changes the realized peak by up to 20 RPS.
+- **Don't score the value at time t against [t + 60, t + 120].** A value Prometheus holds at
+  t can be up to 45 s old (30 s interval + 15 s scrape). LEAD already allows for that, so
+  scoring that way counts the delay twice.
+- **During the history cycles, forecasts reflect what came before the run.** In the
+  Wikipedia replay, which started right after the synthetic one, the first forecasts hit the
+  280 RPS clamp. From the first scored cycle on, the 3-cycle window holds only the run itself.
+  In arm C this means scaling in the history cycles is driven by the previous run's tail.
+  That is harmless for scoring, but Phase 6's cool-down must leave the replica count at the
+  minimum before a run starts.
+
+Reproduce: `make forecaster-deploy`, then
+`make trace-check TRACE=synthetic-s1 TRACE_OUT=experiments/results/forecaster/shadow-synthetic-s1`
+with Prometheus port-forwarded, then
+`.venv/bin/python experiments/analysis/forecast_shadow.py experiments/results/forecaster/shadow-synthetic-s1 --plot ...`.
+
+### Open decision: the model for arms C and D
+
+The plan's example uses Holt-Winters. The backtest does not favour it. It ties with seasonal
+naive on the synthetic workload, loses on Wikipedia, and its upper bound is miscalibrated.
+The options are seasonal naive (simpler, as good or better), Holt-Winters (as planned), or
+both (C and D run once per model, doubling those runs). Both models are exported in shadow
+mode either way.

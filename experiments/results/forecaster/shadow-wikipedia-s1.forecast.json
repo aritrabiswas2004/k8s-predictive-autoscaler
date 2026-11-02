@@ -1,0 +1,34 @@
+{
+ "lead": 60,
+ "window": 60,
+ "scores": {
+  "holtwinters/scored": {
+   "n": 10,
+   "smape": 0.09452585799468591,
+   "coverage": 0.8,
+   "short": 0.0,
+   "excess_pods": 0.4
+  },
+  "holtwinters/spike": {
+   "n": 6,
+   "smape": 0.5640001174607973,
+   "coverage": 0.16666666666666666,
+   "short": 0.8333333333333334,
+   "excess_pods": -1.3333333333333333
+  },
+  "naive/scored": {
+   "n": 10,
+   "smape": 0.02502550356586703,
+   "coverage": 0.8,
+   "short": 0.1,
+   "excess_pods": 0.2
+  },
+  "naive/spike": {
+   "n": 6,
+   "smape": 0.5284754210189693,
+   "coverage": 0.0,
+   "short": 0.8333333333333334,
+   "excess_pods": -2.0
+  }
+ }
+}

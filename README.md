@@ -12,11 +12,11 @@ setup a new pod starts serving **60–75 s after a load step**
 answer is to start the pods before the load arrives.
 
 > **Status:** work in progress. Done so far: the cluster, the demo app, the capacity
-> calibration and the load traces. The forecaster (the core of the autoscaler) and the
-> evaluation are next. There are no results yet, so nothing here claims the prediction
-> helps; the evaluation will show whether, and when, it does.
+> calibration, the load traces and the forecaster (with a backtest of its accuracy). The
+> scaling arms and the evaluation are next. There are no autoscaling results yet, so nothing
+> here claims the prediction helps; the evaluation will show whether, and when, it does.
 
-## How it works (design; the forecaster is being built)
+## How it works (the forecaster runs; scaling on it is the next phase)
 
 ```
          ┌─────────────────────────── scales ────────────────────────────┐
@@ -32,11 +32,13 @@ answer is to start the pods before the load arrives.
    (`http_requests_received_total`), and Prometheus scrapes the counts. Arrivals show demand
    even when pods are overloaded: completions and CPU usage flatten out exactly when more
    pods are needed.
-2. **The forecaster predicts the coming peak.** Every 30 s it reads the recent arrival
-   history and fits a seasonal model (Holt-Winters, with "same as one cycle ago" as the
-   baseline). It then exports `forecast_rps`: the upper bound of the **peak** load in a
-   window that starts about 75 s ahead. Pods must be ready before the load and stay up
-   through it, so it forecasts the peak, not the load at one moment.
+2. **The forecaster predicts the coming peak.** Every 30 s it reads the last three cycles
+   of arrivals and fits two seasonal models: "same as one cycle ago" (seasonal naive) and
+   Holt-Winters. For each it exports `forecast_rps`: the upper bound of the **peak** load
+   60–120 s ahead, which is the time a new pod takes to start serving plus a margin
+   ([why](docs/methodology.md#what-it-forecasts-and-how-far-ahead)). Pods must be ready
+   before the load and stay up through it, so it forecasts the peak, not the load at one
+   moment.
 3. **KEDA scales on the forecast and on current load.** One ScaledObject has two triggers,
    the forecast and the current arrival rate, and the HPA follows whichever asks for more
    pods. The forecast scales ahead of predictable load. The reactive trigger catches what
@@ -90,6 +92,26 @@ Details, raw data and how to reproduce: **[docs/methodology.md](docs/methodology
 
 ![Scale-up after a 25 → 100 RPS step](docs/img/scale-up-lag.png)
 
+## Forecast accuracy (backtest)
+
+Rolling-origin backtest on the scored cycles of every trace, at the forecaster's actual
+lead (details: [methodology](docs/methodology.md#backtest)):
+
+| Workload | Model | Peak sMAPE | 90 % bound covers | Short of pods |
+|---|---|---:|---:|---:|
+| Synthetic | seasonal naive | 21.9 % | 85 % | 4 % |
+| Synthetic | Holt-Winters | 21.1 % | 75 % | 5 % |
+| Synthetic | *current rate (what reactive scaling sees)* | 66.5 % | 40 % | 42 % |
+| Wikipedia | seasonal naive | 2.8 % | 78 % | 5 % |
+| Wikipedia | Holt-Winters | 5.9 % | 89 % | 0 % |
+| Wikipedia | *current rate (what reactive scaling sees)* | 45.9 % | 24 % | 64 % |
+
+Forecasting a minute or two ahead is far better than using the current rate. The simple
+seasonal copy is as good as Holt-Winters on the varied synthetic load and clearly better on
+real Wikipedia traffic.
+
+![Backtest](docs/img/backtest.png)
+
 ## Repository layout
 
 | Path | What |
@@ -99,6 +121,8 @@ Details, raw data and how to reproduce: **[docs/methodology.md](docs/methodology
 | `deploy/monitoring/`, `deploy/keda/` | Helm values for kube-prometheus-stack and KEDA |
 | `deploy/app/` | Deployment, Service, PodDisruptionBudget, ServiceMonitor |
 | `deploy/calibration/` | ScaledObject used by the lag measurement |
+| `forecaster/` | Forecaster in Python: models (seasonal naive, Holt-Winters), service, tests, backtest, Dockerfile |
+| `deploy/forecaster/` | Forecaster Deployment, Service, ServiceMonitor, Grafana dashboard |
 | `loadtest/trace/` | Trace generator (synthetic and Wikipedia), its tests, the raw Wikipedia data and the generated traces |
 | `loadtest/k6/`, `loadtest/*.sh` | k6 scripts (trace player, calibration, load step) and the scripts that run k6 inside the cluster |
 | `experiments/analysis/` | Python analysis and plots |
@@ -117,12 +141,15 @@ make up          # kind cluster + kube-prometheus-stack + KEDA (pinned chart ver
 make deploy      # build the app image, load it into kind, deploy it
 make status      # nodes, CPU allocatable, pods
 
-make test        # Go unit tests + trace generator tests
+make test        # Go unit tests, trace generator tests, forecaster tests (needs make venv)
 make calibrate   # stepped load against one pod  -> knee and RPS_PER_POD
 make lag         # one 25 -> 100 RPS step with reactive KEDA -> scale-up lag breakdown
 
 make traces      # regenerate loadtest/trace/out/ (deterministic per seed)
 make trace-check TRACE=synthetic-s1   # replay a trace at 7 fixed replicas, no scaler
+
+make forecaster-deploy   # build the forecaster image, load it into kind, deploy it
+make backtest            # forecast accuracy on every trace -> experiments/results/backtest/
 
 make down        # delete the cluster
 ```
@@ -137,7 +164,8 @@ The analysis scripts use the virtualenv that `make venv` creates.
 - [x] **Phase 2**: capacity calibration and scale-up lag
 - [x] **Phase 3**: load traces (synthetic with varying cycles, German Wikipedia) and the
   k6 trace player
-- [ ] **Phase 4**: forecaster (Python, reads Prometheus, exports a forecast metric)
+- [x] **Phase 4**: forecaster (seasonal naive and Holt-Winters, exports the forecast peak
+  for KEDA) and its backtest
 - [ ] **Phase 5**: scaling arms (HPA, reactive KEDA at three headroom levels, forecast, hybrid)
 - [ ] **Phase 6**: experiment harness (repeated runs, arm order rotated between repetitions)
 - [ ] **Phase 7**: analysis: cost vs. SLO-violation frontier, startup-delay sweep
