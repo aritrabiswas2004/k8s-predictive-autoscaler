@@ -1,0 +1,24 @@
+# Weekly update PRs for the pinned dependencies. Pins are deliberate (reproducibility); this
+# keeps them from silently going stale. Merging one changes the experiment's environment, so
+# note it in docs/methodology.md if it lands mid-experiment.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    groups:
+      actions: {patterns: ["*"]}
+
+  - package-ecosystem: gomod
+    directory: /app
+    schedule: {interval: weekly}
+    groups:
+      go-modules: {patterns: ["*"]}
+
+  - package-ecosystem: docker
+    directory: /app
+    schedule: {interval: weekly}
+
+  - package-ecosystem: pip
+    directory: /experiments
+    schedule: {interval: weekly}

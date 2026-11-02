@@ -1,0 +1,82 @@
+# Fast checks on every push and pull request. Nothing here needs a cluster: the experiment
+# itself runs on a CPU-pinned local kind cluster (make up) and is not reproducible on shared
+# CI runners, so CI covers what can be checked without one.
+#
+# Third-party actions and images are pinned by commit SHA / digest (tags can be moved);
+# Dependabot (.github/dependabot.yml) proposes updates.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go app (fmt, vet, test -race, build)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "not gofmt-ed:"; echo "$unformatted"; exit 1; fi
+      - name: go mod tidy is clean
+        run: go mod tidy -diff
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: go build ./...
+
+  image:
+    name: App container image builds
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build -t predictive-autoscaling-app:ci app/
+
+  python:
+    name: Trace generator and analysis scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # Includes a check that the committed traces in loadtest/trace/out/ match the generator.
+      - run: make test-trace
+      - name: Analysis scripts compile
+        run: python -m py_compile experiments/analysis/*.py loadtest/trace/*.py
+
+  scripts:
+    name: Shell and k6 scripts
+    runs-on: ubuntu-24.04
+    env:
+      # Same image the cluster runs (loadtest/run-k6.sh).
+      K6_IMAGE: grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        run: git ls-files '*.sh' | xargs shellcheck
+      # k6 inspect evaluates each script's init code and options (scenarios, stages) without
+      # sending load, so a broken script or trace fails here rather than mid-experiment.
+      - name: k6 inspect
+        run: |
+          for s in loadtest/k6/*.js; do
+            echo "== $s"
+            docker run --rm -v "$PWD:/w:ro" "$K6_IMAGE" inspect \
+              -e TRACE=/w/loadtest/trace/out/synthetic-s1.json "/w/$s" > /dev/null
+          done
