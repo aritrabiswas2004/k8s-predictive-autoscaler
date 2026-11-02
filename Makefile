@@ -1,4 +1,4 @@
-.PHONY: build run clean test image deploy up down status
+.PHONY: build run clean test image load deploy up down status
 
 IMAGE ?= predictive-autoscaling-app:dev
 
@@ -21,8 +21,14 @@ test:
 image:
 	docker build -t $(IMAGE) app/
 
-deploy:
-	kubectl apply -f manifests/
+# kind nodes can't pull local images, so copy the image into the cluster.
+load: image
+	kind load docker-image $(IMAGE) --name pa
+
+# The tag stays :dev, so restart to make running pods pick up a freshly loaded image.
+deploy: load
+	kubectl apply -f deploy/app/
+	kubectl rollout restart deployment/web
 
 # Cluster + monitoring + KEDA, from nothing.
 up:

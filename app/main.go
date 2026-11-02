@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,10 +29,13 @@ var (
 		Help: "Total HTTP requests by method, route and status code.",
 	}, []string{"method", "route", "code"})
 
+	// Buckets are dense around the 300 ms SLO. histogram_quantile() interpolates linearly
+	// inside a bucket, so with the default buckets (0.25 then 0.5) a p95 near the SLO would
+	// be a guess across 250 ms. With 0.3 as an edge, "is p95 over the SLO?" is exact.
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "HTTP request latency in seconds.",
-		Buckets: prometheus.DefBuckets,
+		Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1, 2},
 	}, []string{"method", "route"})
 
 	// Counted when a /work request arrives, before any CPU is spent. http_requests_total
@@ -113,22 +120,59 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	iterations := envInt("WORK_ITERATIONS", 300000)
-	warmup := time.Duration(envInt("WARMUP_SECONDS", 25)) * time.Second
+	startupDelay := time.Duration(envInt("STARTUP_DELAY_SECONDS", 30)) * time.Second
+	drainDelay := time.Duration(envInt("SHUTDOWN_DRAIN_SECONDS", 5)) * time.Second
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", workHandler(iterations))
 	mux.HandleFunc("GET /work", workHandler(iterations))
 
 	mux.HandleFunc("GET /healthz", healthHandler)
-	mux.HandleFunc("GET /readyz", readyHandler)
+	mux.HandleFunc("GET /ready", readyHandler)
 
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	time.AfterFunc(warmup, func() {
+	startupTimer := time.AfterFunc(startupDelay, func() {
 		ready.Store(true)
-		log.Printf("warm-up done after %v, ready", warmup)
+		log.Printf("startup delay of %v done, ready", startupDelay)
 	})
 
-	log.Printf("Listening on http://localhost:%d (iterations=%d, warmup=%v)", port, iterations, warmup)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), logRequests(mux)))
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           logRequests(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Cancelled on SIGTERM (what Kubernetes sends) or Ctrl-C locally.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	go func() {
+		log.Printf("Listening on http://localhost:%d (iterations=%d, startup delay=%v)", port, iterations, startupDelay)
+		// ErrServerClosed is the normal result of Shutdown, not a failure.
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop() // restore default signal handling: a second Ctrl-C kills the process immediately
+
+	// Kubernetes removes the pod from the Service's endpoints at the same time as it sends
+	// SIGTERM, not before, so requests keep arriving for a few seconds. Keep serving
+	// (and report not-ready) until that has propagated, then stop accepting connections.
+	// Stopping the timer keeps a pod terminated mid-startup from flipping back to ready.
+	startupTimer.Stop()
+	ready.Store(false)
+	log.Printf("SIGTERM received, draining for %v", drainDelay)
+	time.Sleep(drainDelay)
+
+	// Shutdown waits for in-flight requests. The timeout plus drainDelay must stay below
+	// the pod's terminationGracePeriodSeconds (30 s), or the kubelet SIGKILLs us first.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+	log.Print("shutdown complete")
 }

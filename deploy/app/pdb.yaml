@@ -1,0 +1,14 @@
+# Limits voluntary disruptions (node drain, eviction) to one web pod at a time.
+# maxUnavailable rather than minAvailable so it works at any replica count the
+# autoscaler picks. It does not affect autoscaler scale-down.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: web

@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  selector:
+    matchLabels:
+      app: web
+  # Copy the Service's app label onto every scraped series, so queries can use
+  # {app="web"} instead of depending on job/service naming.
+  targetLabels:
+    - app
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

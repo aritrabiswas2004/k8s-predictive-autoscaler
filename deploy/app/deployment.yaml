@@ -1,23 +1,29 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pa-app
+  name: web
   labels:
-    app: pa-app
+    app: web
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pa-app
+      app: web
   template:
     metadata:
       labels:
-        app: pa-app
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: "/metrics"
+        app: web
     spec:
+      # Only the app node, and only web may run there (the node is tainted role=app).
+      nodeSelector:
+        role: app
+      tolerations:
+        - key: role
+          operator: Equal
+          value: app
+          effect: NoSchedule
+      # Must cover the app's shutdown sequence: ~5 s drain + up to 15 s in-flight requests.
+      terminationGracePeriodSeconds: 30
       containers:
         - name: app
           image: predictive-autoscaling-app:dev
@@ -27,11 +33,13 @@ spec:
               containerPort: 8080
           env:
             # ~10 ms of CPU per request on an M-series Mac, i.e. ~50 RPS at 0.5 CPU.
-            # Recalibrate with a load test on the real nodes.
+            # Calibrated properly in Phase 2.
             - name: WORK_ITERATIONS
               value: "150000"
-            - name: WARMUP_SECONDS
-              value: "25"
+            # Simulated warm-up (JVM start, model load, cache fill). This is what makes
+            # reactive scale-up lag visible.
+            - name: STARTUP_DELAY_SECONDS
+              value: "30"
           # requests == limits: Guaranteed QoS, predictable per-pod capacity,
           # and cost per pod is simply 0.5 CPU + 128Mi.
           resources:
@@ -43,7 +51,7 @@ spec:
               memory: 128Mi
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /ready
               port: http
             periodSeconds: 2
             failureThreshold: 1

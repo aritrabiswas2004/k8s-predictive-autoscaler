@@ -1,12 +1,12 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: pa-app
+  name: web
   labels:
-    app: pa-app
+    app: web
 spec:
   selector:
-    app: pa-app
+    app: web
   ports:
     - name: http
       port: 80
