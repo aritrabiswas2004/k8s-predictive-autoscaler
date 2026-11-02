@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pa-app
+  labels:
+    app: pa-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pa-app
+  template:
+    metadata:
+      labels:
+        app: pa-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: app
+          image: predictive-autoscaling-app:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # ~10 ms of CPU per request on an M-series Mac, i.e. ~50 RPS at 0.5 CPU.
+            # Recalibrate with a load test on the real nodes.
+            - name: WORK_ITERATIONS
+              value: "150000"
+            - name: WARMUP_SECONDS
+              value: "25"
+          # requests == limits: Guaranteed QoS, predictable per-pod capacity,
+          # and cost per pod is simply 0.5 CPU + 128Mi.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
