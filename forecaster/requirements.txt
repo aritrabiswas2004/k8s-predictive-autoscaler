@@ -1,0 +1,6 @@
+# Runtime dependencies of the forecaster image, pinned (reproducibility).
+numpy==2.5.4
+pandas==3.1.0
+prometheus-client==0.26.0
+scipy==1.18.1
+statsmodels==0.15.0

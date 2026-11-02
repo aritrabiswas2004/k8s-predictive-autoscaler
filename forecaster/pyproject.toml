@@ -1,0 +1,10 @@
+[project]
+name = "forecaster"
+version = "0.1.0"
+description = "Forecasts request arrivals and exports the peak over an upcoming window for KEDA"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "backtest"]
+testpaths = ["tests"]
+addopts = "-q"

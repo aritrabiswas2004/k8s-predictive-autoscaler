@@ -1,6 +1,9 @@
-.PHONY: build run clean test test-trace image load deploy up down status venv calibrate lag traces trace-plot trace-check
+.PHONY: build run clean test test-trace test-forecaster image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest
 
 IMAGE ?= predictive-autoscaling-app:dev
+FORECASTER_IMAGE ?= predictive-autoscaling-forecaster:dev
+# Python with the forecaster's dependencies (make venv); CI passes PY=python.
+PY ?= .venv/bin/python
 
 # Pinned chart versions (reproducibility).
 KPS_VERSION  := 92.17.0
@@ -15,11 +18,14 @@ run:
 clean:
 	rm -rf ./bin
 
-test: test-trace
+test: test-trace test-forecaster
 	cd app/ && go test ./...
 
 test-trace:
 	python3 -m unittest discover -s loadtest/trace -q
+
+test-forecaster:
+	$(PY) -m pytest forecaster
 
 image:
 	docker build -t $(IMAGE) app/
@@ -45,11 +51,11 @@ up:
 		--version $(KEDA_VERSION) --namespace keda --create-namespace \
 		-f deploy/keda/values.yaml --wait --timeout 5m
 
-# Python tooling for analysis (plots).
+# Python tooling: analysis plots and the forecaster (tests, backtest).
 venv: .venv/bin/python
-.venv/bin/python: experiments/requirements.txt
+.venv/bin/python: experiments/requirements.txt forecaster/requirements.txt forecaster/requirements-dev.txt
 	python3 -m venv .venv
-	.venv/bin/pip install -q -r experiments/requirements.txt
+	.venv/bin/pip install -q -r experiments/requirements.txt -r forecaster/requirements-dev.txt
 	touch .venv/bin/python
 
 # Phase 2: stepped load against one pod; finds the knee and RPS_PER_POD.
@@ -92,6 +98,20 @@ trace-check:
 	kubectl rollout status deployment/web
 	K6_FILES=trace.json=loadtest/trace/out/$(TRACE).json ./loadtest/run-k6.sh loadtest/k6/trace.js \
 		$(TRACE_OUT) RUN_ID=check-$(TRACE)
+
+# Phase 4: the forecaster. Runs in every arm (shadow mode); only arms C and D scale on it.
+forecaster-image:
+	docker build -t $(FORECASTER_IMAGE) forecaster/
+
+forecaster-deploy: forecaster-image
+	kind load docker-image $(FORECASTER_IMAGE) --name pa
+	kubectl apply -f deploy/forecaster/
+	kubectl -n monitoring rollout restart deployment/forecaster
+	kubectl -n monitoring rollout status deployment/forecaster
+
+# Rolling-origin backtest of the models on every trace and on the recorded runs.
+backtest: venv
+	$(PY) forecaster/backtest/backtest.py --plot docs/img/backtest.png
 
 down:
 	kind delete cluster --name pa

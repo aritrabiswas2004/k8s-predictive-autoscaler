@@ -1,0 +1,70 @@
+# The forecaster runs in every arm (shadow mode): it only exports metrics, and only arms C and
+# D scale on them. Configuration: forecaster/src/forecaster/config.py, values explained in
+# docs/methodology.md#forecaster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forecaster
+  namespace: monitoring
+  labels:
+    app: forecaster
+spec:
+  replicas: 1
+  # One instance at a time: two would export conflicting series during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: forecaster
+  template:
+    metadata:
+      labels:
+        app: forecaster
+    spec:
+      nodeSelector:
+        role: tools
+      containers:
+        - name: forecaster
+          image: predictive-autoscaling-forecaster:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8000
+          env:
+            - name: PROMETHEUS_URL
+              value: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+            - name: MODELS
+              value: naive,holtwinters
+            # Window [now+LEAD, now+LEAD+WINDOW] on the 1-minute-rate axis. LEAD = startup
+            # delay of the app (30 s) + 30 s; see docs/methodology.md#forecaster.
+            - name: LEAD_SECONDS
+              value: "60"
+            - name: WINDOW_SECONDS
+              value: "60"
+            - name: RPS_PER_POD
+              value: "40"
+            - name: MAX_REPLICAS
+              value: "7"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          # The HTTP server runs in its own thread, so this only shows the process is alive.
+          # A stuck forecast loop shows up as the age of
+          # forecast_last_success_timestamp_seconds instead (Phase 8 alert).
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

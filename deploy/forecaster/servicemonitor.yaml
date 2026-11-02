@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: forecaster
+  namespace: monitoring
+  labels:
+    app: forecaster
+spec:
+  selector:
+    matchLabels:
+      app: forecaster
+  targetLabels:
+    - app
+  endpoints:
+    - port: metrics
+      interval: 15s  # same as every other target

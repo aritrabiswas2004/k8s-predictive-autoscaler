@@ -42,24 +42,33 @@ jobs:
       - run: go build ./...
 
   image:
-    name: App container image builds
+    name: Container images build (app, forecaster)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker build -t predictive-autoscaling-app:ci app/
+      - run: docker build -t predictive-autoscaling-forecaster:ci forecaster/
+      - name: Forecaster image starts and imports its dependencies
+        run: |
+          docker run --rm --entrypoint python predictive-autoscaling-forecaster:ci \
+            -c "import forecaster.service, statsmodels; print('ok', statsmodels.__version__)"
 
   python:
-    name: Trace generator and analysis scripts
+    name: Trace generator, forecaster and analysis scripts
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: forecaster/requirements*.txt
       # Includes a check that the committed traces in loadtest/trace/out/ match the generator.
       - run: make test-trace
+      - run: pip install -r forecaster/requirements-dev.txt
+      - run: make test-forecaster PY=python
       - name: Analysis scripts compile
-        run: python -m py_compile experiments/analysis/*.py loadtest/trace/*.py
+        run: python -m py_compile experiments/analysis/*.py loadtest/trace/*.py forecaster/backtest/*.py
 
   scripts:
     name: Shell and k6 scripts

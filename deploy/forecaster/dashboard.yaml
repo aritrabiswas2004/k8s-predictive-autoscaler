@@ -1,0 +1,338 @@
+# Grafana dashboard, picked up by the kube-prometheus-stack Grafana sidecar (label
+# grafana_dashboard: "1"). Shows the forecast against the realized arrivals.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-forecast
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  forecast.json: |
+    {
+      "uid": "pa-forecast",
+      "title": "Predictive autoscaling: forecast",
+      "schemaVersion": 39,
+      "time": {
+        "from": "now-30m",
+        "to": "now"
+      },
+      "refresh": "15s",
+      "tags": [
+        "predictive-autoscaling"
+      ],
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Forecast vs realized peak (aligned)",
+          "description": "At time T: the peak of the arrival rate over the last 60 s, and the forecast that was made for that window 120 s earlier (LEAD 60 s + WINDOW 60 s). If LEAD/WINDOW change, change the offset.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "expr": "max_over_time(sum(rate(http_requests_received_total{app=\"web\"}[1m]))[1m:15s])",
+              "legendFormat": "realized peak, last 60 s"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "B",
+              "expr": "forecast_rps{bound=\"upper\"} offset 2m",
+              "legendFormat": "{{model}} upper bound"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "C",
+              "expr": "forecast_rps{bound=\"mean\"} offset 2m",
+              "legendFormat": "{{model}} mean"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Arrivals and live forecast",
+          "description": "Live forecast_rps is for [now+60 s, now+120 s], so it leads the arrival rate.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 10
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "expr": "sum(rate(http_requests_received_total{app=\"web\"}[1m]))",
+              "legendFormat": "arrivals (1-min rate)"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "B",
+              "expr": "forecast_rps{bound=\"upper\"}",
+              "legendFormat": "{{model}} upper (for +60..120 s)"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Rolling sMAPE of the mean peak",
+          "description": "Last 10 scored forecasts (about one cycle).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 19
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "expr": "forecast_smape",
+              "legendFormat": "{{model}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Rolling coverage of the upper bound",
+          "description": "Share of recent windows whose realized peak stayed at or below the upper bound (nominal 0.9).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 19
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "expr": "forecast_coverage_ratio",
+              "legendFormat": "{{model}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Forecast age",
+          "description": "Seconds since the last successful forecast. Grows when Prometheus or the fit fails; the forecast is withdrawn 120 s after it was made.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 28
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "expr": "time() - forecast_last_success_timestamp_seconds",
+              "legendFormat": "{{model}}"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Replicas vs pods implied by the forecast",
+          "description": "Implied = ceil(upper / RPS_PER_POD 40). Only arms C and D scale on it.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 28
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "A",
+              "expr": "kube_deployment_status_replicas{deployment=\"web\"}",
+              "legendFormat": "web replicas"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "refId": "B",
+              "expr": "ceil(forecast_rps{bound=\"upper\"} / 40)",
+              "legendFormat": "{{model}} implied pods"
+            }
+          ]
+        }
+      ]
+    }
