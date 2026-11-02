@@ -1,0 +1,3 @@
+# KEDA values. Operator, metrics API server and webhooks all run on the tools node.
+nodeSelector:
+  role: tools

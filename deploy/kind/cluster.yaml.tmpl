@@ -1,0 +1,41 @@
+# kind cluster: 1 control-plane, 1 app worker, 1 tools worker.
+# Rendered by up.sh, which fills in APP_RESERVED / TOOLS_RESERVED.
+#
+# Why system-reserved: kind nodes are containers. up.sh pins each one to its own CPUs
+# (docker update --cpuset-cpus), but kubelet can't see that and would report every CPU
+# of the Docker VM as allocatable. Reserving the CPUs a node doesn't own makes
+# allocatable match its pinned CPUs, so the scheduler can't over-pack the app node.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pa
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  - role: worker
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    labels:
+      role: app
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          # Only the web app tolerates this, so nothing else lands on the app node
+          # (DaemonSets like node-exporter tolerate all NoSchedule taints).
+          taints:
+            - key: role
+              value: app
+              effect: NoSchedule
+          kubeletExtraArgs:
+            - name: system-reserved
+              value: cpu=${APP_RESERVED}
+  - role: worker
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    labels:
+      role: tools
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            - name: system-reserved
+              value: cpu=${TOOLS_RESERVED}

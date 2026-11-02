@@ -1,6 +1,10 @@
-.PHONY: build run clean test image deploy
+.PHONY: build run clean test image deploy up down status
 
 IMAGE ?= predictive-autoscaling-app:dev
+
+# Pinned chart versions (reproducibility).
+KPS_VERSION  := 92.17.0
+KEDA_VERSION := 2.21.0
 
 build:
 	cd app/ && go build -o ../bin/pa .
@@ -18,4 +22,24 @@ image:
 	docker build -t $(IMAGE) app/
 
 deploy:
-	kubectl apply -f k8s/
+	kubectl apply -f manifests/
+
+# Cluster + monitoring + KEDA, from nothing.
+up:
+	./deploy/kind/up.sh
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
+	helm repo add kedacore https://kedacore.github.io/charts --force-update
+	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		--version $(KPS_VERSION) --namespace monitoring --create-namespace \
+		-f deploy/monitoring/values.yaml --wait --timeout 10m
+	helm upgrade --install keda kedacore/keda \
+		--version $(KEDA_VERSION) --namespace keda --create-namespace \
+		-f deploy/keda/values.yaml --wait --timeout 5m
+
+down:
+	kind delete cluster --name pa
+
+status:
+	kubectl get nodes -L role -o wide
+	kubectl get nodes -o custom-columns='NODE:.metadata.name,CPU_ALLOCATABLE:.status.allocatable.cpu,TAINTS:.spec.taints[*].key'
+	kubectl get pods -A -o wide

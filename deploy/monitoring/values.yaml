@@ -1,0 +1,48 @@
+# kube-prometheus-stack values. Everything runs on the tools node.
+
+# No alert routing is needed for experiments; alert rules are still visible in Prometheus.
+alertmanager:
+  enabled: false
+
+# In kind these components listen on 127.0.0.1 inside the control-plane container, so
+# their scrape targets are always down. They aren't needed for the experiment.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+grafana:
+  nodeSelector:
+    role: tools
+
+kube-state-metrics:
+  nodeSelector:
+    role: tools
+
+prometheusOperator:
+  nodeSelector:
+    role: tools
+  admissionWebhooks:
+    patch:
+      nodeSelector:
+        role: tools
+
+prometheus:
+  prometheusSpec:
+    nodeSelector:
+      role: tools
+    # Same interval for every target and every arm (fairness). The chart default is 30s.
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    # k6 pushes client-side latency here via remote write (the SLO metric).
+    enableRemoteWriteReceiver: true
+    # Pick up every ServiceMonitor/PodMonitor/rule in the cluster, not only ones
+    # carrying this Helm release's label.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 7d
