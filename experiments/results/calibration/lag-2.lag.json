@@ -1,0 +1,36 @@
+{
+  "threshold_rps": 42.0,
+  "replicas_before": 1,
+  "metric_limit_rps": 46.2,
+  "marks": {
+    "step": "2026-11-02T17:11:42.267+00:00",
+    "metric": "2026-11-02T17:12:08.267+00:00",
+    "decision": "2026-11-02T17:12:11.000+00:00",
+    "scheduled": "2026-11-02T17:12:11.000+00:00",
+    "started": "2026-11-02T17:12:12.000+00:00",
+    "ready": "2026-11-02T17:12:42.207+00:00",
+    "serving": "2026-11-02T17:12:42.610+00:00"
+  },
+  "breakdown_s": {
+    "step->metric": 26.0,
+    "metric->decision": 2.7,
+    "decision->scheduled": 0.0,
+    "scheduled->started": 1.0,
+    "started->ready": 30.2,
+    "ready->serving": 0.4
+  },
+  "total_s": 60.3,
+  "rescale_events": [
+    {
+      "at": "2026-11-02T17:12:11.000+00:00",
+      "message": "New size: 2; reason: external metric s0-prometheus(&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: web-lag,},MatchExpressions:[]LabelSelectorRequirement{},}) above target"
+    },
+    {
+      "at": "2026-11-02T17:13:41.000+00:00",
+      "message": "New size: 3; reason: external metric s0-prometheus(&LabelSelector{MatchLabels:map[string]string{scaledobject.keda.sh/name: web-lag,},MatchExpressions:[]LabelSelectorRequirement{},}) above target"
+    }
+  ],
+  "first_wave_pods": [
+    "web-695b854c95-bvjvf"
+  ]
+}

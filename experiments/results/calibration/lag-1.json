@@ -1,0 +1,1 @@
+{"config":{"TARGET":"http://web.default.svc.cluster.local/work","LOW_RPS":25,"HIGH_RPS":100,"LOW_SECONDS":90,"HIGH_SECONDS":150},"requests":16480,"dropped":771,"failed_rate":0.15297330097087378,"p50_ms":872.6920419999999,"p95_ms":10000.6641945,"p99_ms":10000.998680050001,"max_ms":10011.707615}

@@ -1,0 +1,26 @@
+time="2026-11-02T17:06:41Z" level=info msg="STEP_AT=1793639201289" source=console
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+time="2026-11-02T17:07:13Z" level=warning msg="Request Failed" error="Get \"http://web.default.svc.cluster.local/work\": request timeout"
+
+===SUMMARY-BEGIN===
+{"config":{"TARGET":"http://web.default.svc.cluster.local/work","LOW_RPS":25,"HIGH_RPS":100,"LOW_SECONDS":90,"HIGH_SECONDS":150},"requests":16480,"dropped":771,"failed_rate":0.15297330097087378,"p50_ms":872.6920419999999,"p95_ms":10000.6641945,"p99_ms":10000.998680050001,"max_ms":10011.707615}
+===SUMMARY-END===
+[run-k6.sh: 2501 more "Request Failed" lines omitted, 2521 in total]

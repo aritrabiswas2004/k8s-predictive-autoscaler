@@ -1,0 +1,26 @@
+# Used only by loadtest/measure-lag.sh. Reactive scaling on arrivals with the experiment's
+# scale-down settings (R100), but minReplicaCount 1 so a step from one pod is
+# easy to read. __THRESHOLD__ is replaced with RPS_PER_POD.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: web-lag
+spec:
+  scaleTargetRef:
+    name: web
+  minReplicaCount: 1
+  maxReplicaCount: 7
+  # No pollingInterval: KEDA 2.21 warns it only matters for scaling to/from zero. For 1..N
+  # the HPA controller asks KEDA's metrics server for the value every 15 s (HPA sync period).
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 120
+  triggers:
+    - type: prometheus
+      metricType: AverageValue
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: sum(rate(http_requests_received_total{app="web"}[1m]))
+        threshold: "__THRESHOLD__"
