@@ -1,4 +1,4 @@
-.PHONY: build run clean test image load deploy up down status venv calibrate lag
+.PHONY: build run clean test test-trace image load deploy up down status venv calibrate lag traces trace-plot trace-check
 
 IMAGE ?= predictive-autoscaling-app:dev
 
@@ -15,8 +15,11 @@ run:
 clean:
 	rm -rf ./bin
 
-test:
+test: test-trace
 	cd app/ && go test ./...
+
+test-trace:
+	python3 -m unittest discover -s loadtest/trace -q
 
 image:
 	docker build -t $(IMAGE) app/
@@ -66,6 +69,29 @@ LAG_HIGH    ?= 100
 LAG_OUT     ?= experiments/results/calibration/lag-$(shell date +%Y%m%d-%H%M%S)
 lag:
 	./loadtest/measure-lag.sh $(LAG_OUT) $(RPS_PER_POD) $(LAG_LOW) $(LAG_HIGH)
+
+# Phase 3: load traces. Deterministic: the same seed always gives the same file.
+TRACE_SEEDS ?= 1 2 3 4 5
+traces:
+	for s in $(TRACE_SEEDS); do \
+		python3 loadtest/trace/generate.py synthetic --seed $$s --out loadtest/trace/out/synthetic-s$$s.json && \
+		python3 loadtest/trace/generate.py wikipedia --seed $$s --out loadtest/trace/out/wikipedia-s$$s.json || exit 1; \
+	done
+
+trace-plot: venv
+	.venv/bin/python loadtest/trace/plot.py --out docs/img/traces.png
+
+# Replay one trace against a fixed replica count, no scaler: checks that k6 delivers the
+# trace (sent = offered, no dropped iterations) and that the app keeps up at max replicas.
+TRACE          ?= synthetic-s1
+CHECK_REPLICAS ?= 7
+TRACE_OUT      ?= experiments/results/traces/check-$(TRACE)
+trace-check:
+	@if kubectl get scaledobject,hpa -o name | grep -q .; then echo "remove scalers first" >&2; exit 1; fi
+	kubectl scale deployment web --replicas=$(CHECK_REPLICAS)
+	kubectl rollout status deployment/web
+	K6_FILES=trace.json=loadtest/trace/out/$(TRACE).json ./loadtest/run-k6.sh loadtest/k6/trace.js \
+		$(TRACE_OUT) RUN_ID=check-$(TRACE)
 
 down:
 	kind delete cluster --name pa

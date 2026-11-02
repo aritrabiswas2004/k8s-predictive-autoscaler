@@ -6,7 +6,8 @@
 # Writes <out-prefix>.json (the script's handleSummary output), <out-prefix>.log (full pod
 # log) and <out-prefix>.docker-stats.csv (CPU of the kind node containers, sampled every few
 # seconds: the tools node must stay well below saturation, see HANDOVER pitfalls).
-# KEY=VALUE pairs are passed to the script as k6 -e variables.
+# KEY=VALUE pairs are passed to the script as k6 -e variables. K6_FILES="name=path ..." mounts
+# extra files next to the script in /scripts (e.g. K6_FILES=trace.json=loadtest/trace/out/x.json).
 set -euo pipefail
 
 script=$1; out=$2; shift 2
@@ -17,7 +18,9 @@ prom_rw=http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write
 
 mkdir -p "$(dirname "$out")"
 kubectl get ns "$ns" >/dev/null 2>&1 || kubectl create ns "$ns"
-kubectl -n "$ns" create configmap k6-script --from-file=script.js="$script" \
+files=(--from-file=script.js="$script")
+for f in ${K6_FILES:-}; do files+=(--from-file="$f"); done
+kubectl -n "$ns" create configmap k6-script "${files[@]}" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$ns" delete pod k6 --ignore-not-found --wait >/dev/null
 
@@ -34,6 +37,12 @@ metadata:
 spec:
   restartPolicy: Never
   nodeSelector: {role: tools}
+  # Without connection reuse every request leaves a socket in TIME_WAIT for 60 s, all to the
+  # same Service IP:port. The default port range (28k) would cap that at ~470 new connections
+  # per second; the full range (64k) at ~1000. ip_local_port_range is a namespaced "safe" sysctl.
+  securityContext:
+    sysctls:
+      - {name: net.ipv4.ip_local_port_range, value: "1024 65535"}
   containers:
     - name: k6
       image: $image

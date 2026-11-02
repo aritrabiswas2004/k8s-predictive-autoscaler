@@ -6,7 +6,8 @@
 // drain before the next one starts. The first WARM_SECONDS of every step are tagged m=n and
 // excluded from the per-step numbers.
 //
-// Env: TARGET, STEPS (comma-separated RPS), STEP_SECONDS, WARM_SECONDS, GAP_SECONDS.
+// Env: TARGET, STEPS (comma-separated RPS), STEP_SECONDS, WARM_SECONDS, GAP_SECONDS,
+// NO_REUSE=1 (new connection per request, as in trace.js; the Phase 2 sweeps reused them).
 
 import http from 'k6/http';
 import exec from 'k6/execution';
@@ -16,6 +17,7 @@ const STEPS = (__ENV.STEPS || '10,20,30,40,50,60,70,80').split(',').map(Number);
 const STEP_SECONDS = Number(__ENV.STEP_SECONDS || 50);
 const WARM_SECONDS = Number(__ENV.WARM_SECONDS || 10);
 const GAP_SECONDS = Number(__ENV.GAP_SECONDS || 10);
+const NO_REUSE = __ENV.NO_REUSE === '1';
 
 const scenarios = {};
 const thresholds = {};
@@ -43,6 +45,7 @@ STEPS.forEach((rate, i) => {
 export const options = {
   scenarios,
   thresholds,
+  noVUConnectionReuse: NO_REUSE,
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   discardResponseBodies: true,
 };
@@ -76,6 +79,6 @@ export function handleSummary(data) {
       max_ms: d ? d.values.max : null,
     };
   });
-  const out = { config: { TARGET, STEPS, STEP_SECONDS, WARM_SECONDS, GAP_SECONDS }, steps: rows };
+  const out = { config: { TARGET, STEPS, STEP_SECONDS, WARM_SECONDS, GAP_SECONDS, NO_REUSE }, steps: rows };
   return { stdout: `\n===SUMMARY-BEGIN===\n${JSON.stringify(out)}\n===SUMMARY-END===\n` };
 }

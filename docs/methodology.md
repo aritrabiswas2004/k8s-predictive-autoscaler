@@ -17,6 +17,8 @@ section.
 | `STARTUP_DELAY_SECONDS` | 30 (swept 0/30/60 later, R6) | plan |
 | Scale-up lag, step → new pod serving | **≈ 60 s measured, 60–75 s expected** | [lag](#scale-up-lag) |
 | `minReplicaCount` / `maxReplicaCount` | **2 / 7** | [replica bounds](#replica-bounds) |
+| Load traces | 5 cycles × 300 s (3 history, 2 scored), seeds 1–5 per workload | [load traces](#load-traces) |
+| Connections | new connection per request (`noVUConnectionReuse`) | [load generation](#load-generation-one-connection-per-request) |
 
 ## Setup
 
@@ -176,29 +178,125 @@ Reproduce: `make lag RPS_PER_POD=42` (one rep), then
   **7 pods** of 500m. `maxReplicaCount = 7`.
 - `minReplicaCount = 2` (plan), i.e. 80 RPS of capacity at `RPS_PER_POD`.
 
-## Constraints for the traces (Phase 3)
+## Load traces
+
+`loadtest/trace/generate.py` writes a trace: the offered RPS every 5 s, which
+`loadtest/k6/trace.js` replays with one `ramping-arrival-rate` stage per point (k6 ramps
+linearly between them). It is deterministic: the same seed always gives the same file, so
+every arm sees exactly the same load. Seeds 1–5 of both workloads are committed in
+`loadtest/trace/out/`, and a test checks that they match the generator.
+
+![Load traces](img/traces.png)
+
+**Run structure.** Five cycles of 300 s (25 min). Each cycle is a compressed day. The first
+three are history: the forecaster learns from them and they are not scored. The last two are
+scored, and an unforecastable spike falls in the last one, so no later scored cycle ever has
+it in its history.
+
+**Synthetic workload.** A fixed daily shape (night baseline, morning ramp, peak, midday dip,
+second peak, evening ramp down), with each cycle varied so that "same as yesterday" is never
+the exact answer (plan revision R2):
+
+| Parameter | Default | Why |
+|---|---|---|
+| Base / nominal peak | 30 / 120 RPS | the base fits within `minReplicaCount` 2 (80 RPS) |
+| Amplitude | peak height above base × U(0.8, 1.2) per cycle | varies the peak |
+| Timing | shape shifted by U(−0.1, 0.1) × cycle, i.e. ±30 s | varies when the ramp starts |
+| Trend | level +10 % over the run | something a seasonal copy misses |
+| Noise | × (1 + 0.04 z), z ~ N(0,1) clipped at ±2, every 5 s | short-term jitter |
+
+The night baseline covers both ends of each cycle with 0.1 of a cycle to spare, so the timing
+shift never moves load across a cycle boundary.
+
+**Real workload.** Hourly pageviews of German Wikipedia (Wikimedia REST API, `user` agent,
+all access), 3–7 March 2025 (Monday to Friday). The raw response is committed in
+`loadtest/trace/raw/`. Transformation:
+
+1. One real day becomes one 300 s cycle (1 hour = 12.5 s). Cycles start at 03:00 UTC, the
+   daily trough, so cycle boundaries fall at the baseline as in the synthetic shape.
+2. Each hourly count is placed at the middle of its hour; points in between are linear
+   interpolation.
+3. The 5-day minimum maps to 30 RPS and the maximum to 150 RPS (affine). The real ratio is
+   about 10× (night to evening peak); keeping it would need a night rate below what two pods
+   are for.
+4. The same noise and spike as the synthetic trace are added.
+
+German rather than English Wikipedia: almost all of its readers share one time zone, so it
+has a clear daily cycle (about 10× from trough to peak), while English Wikipedia's global
+audience flattens its cycle to 1.6×. English Wikipedia's 3 March also has a one-off peak from
+the Oscars.
+
+**How predictable each workload is.** On the noise-free scored cycles, a forecast of "same as
+the previous cycle" has an sMAPE of **10–38 %** on synthetic seeds 1–3 and **2–5 %** on the
+Wikipedia week (5–7 % if the window ends on a Saturday). Real daily traffic is very regular.
+The two workloads are therefore an easy realistic case and a hard varied case, and the
+results will be reported per workload. Prediction winning only on Wikipedia would be a
+different finding from winning on both.
+
+**The spike.** +120 RPS on top of the trace for 80 s (5 s rise, 60 s hold, 15 s fall), placed
+at a seeded position in the last cycle. Its position depends on the seed only, so seed N has
+the same spike in both workloads.
+
+**Constraints from Phase 2, checked by the generator:**
 
 - **R60 must fit.** R60 targets 0.6 × 40 = 24 RPS per pod, so a peak of P needs
-  ceil(P / 24) ≤ 7 pods, i.e. **P ≤ 168 RPS** for the highest cycle *including* the ±20 %
-  amplitude variation and noise. A nominal peak of about 130 RPS fits (the +20 % cycle is
-  156).
-- **Ramps must outrun R100.** A pod running at `RPS_PER_POD` has 54 − 40 = 14 RPS of headroom
-  before the knee. With n pods and ~60–75 s of lag, a ramp steeper than about
-  14 n / 60 RPS/s outruns reactive scaling (≈ 0.7 RPS/s at 3 pods). The synthetic ramps
-  should be well above that.
-- **The spike** can exceed what R60 can provision. Its height is capped by what 7 pods can
-  serve (7 × ~54 ≈ 380 RPS).
+  ceil(P / 24) ≤ 7 pods: **P ≤ 168 RPS**, including amplitude, trend and noise. The generator
+  fails (it never clips) if a point outside the spike exceeds it. Seeds 1–5 peak at 142–159
+  RPS (synthetic) and 146–161 RPS (Wikipedia).
+- **Ramps must outrun R100.** A pod at `RPS_PER_POD` has 54 − 40 = 14 RPS of headroom before
+  the knee. With n pods and ~60–75 s of lag, a ramp steeper than about 14 n / 60 RPS/s
+  outruns reactive scaling: 0.47 RPS/s at 2 pods, 0.7 at 3. The steepest 60 s rise of the
+  noise-free level is **1.8–1.9 RPS/s** (synthetic) and **1.1 RPS/s** (Wikipedia), 1.6–4×
+  steeper.
+- **The spike** may exceed what R60 can provision (seeds 1–5 reach 220–264 RPS); it stays
+  below what 7 pods can serve (7 × ~54 ≈ 380 RPS).
 
-## Open decision: connection reuse in k6
+## Load generation: one connection per request
 
-Real traffic arriving through an L7 load balancer or from many independent clients spreads
-per request. Our k6 VUs reuse connections, which pins load to whichever pods existed when a
-connection was opened. Options for the Phase 3 load script:
+kube-proxy balances **connections**, not requests. With keep-alive, k6's VUs stay on the
+pods that existed when their connections opened: after a scale-up in Phase 2, the old pod
+kept about 64 RPS and the new one got about 36. Traffic from many independent clients, or
+through an L7 load balancer, spreads per request instead. `trace.js` therefore sets
+`noVUConnectionReuse: true` for every arm, so each request opens a new connection and lands
+on a random ready pod. On a 2-minute smoke run at 7 pods, each pod's share was within 10 % of
+the busiest's.
 
-1. **No connection reuse** (`noVUConnectionReuse: true`): every request opens a new
-   connection, so kube-proxy spreads load per request across ready pods, like many
-   independent clients. It costs one in-cluster TCP handshake per request.
-2. **Keep reuse:** realistic for a few long-lived clients, but it adds a balancing effect
-   that favours whichever arm happens to open connections later.
+Consequences, measured:
 
-Recommendation: option 1, applied identically to every arm.
+- **Capacity is unchanged.** A 1-pod sweep without connection reuse
+  (`sweep-1pod-noreuse.json`, the purple curve above) crosses the SLO between 54 and 57 RPS
+  (interpolated 54.6), the same knee. `RPS_PER_POD` stays 40. CPU per request rose from
+  ~8.5 ms to ~8.7 ms.
+- **The tail is fatter near the knee.** Per-pod arrivals are random rather than smooth, so a
+  pod sometimes gets several requests at once and exhausts its 50 ms of CPU per 100 ms CFS
+  period. In the 1-pod sweep, p99 at 50–54 RPS was 85–105 ms (13 ms with reuse).
+- **Ports.** Each request leaves a socket in TIME_WAIT for 60 s, all to one Service IP and
+  port. `run-k6.sh` widens the k6 pod's local port range (a namespaced "safe" sysctl) to
+  1024–65535, which allows ~1000 new connections/s; the traces need at most ~265.
+
+## Trace replay check
+
+Each workload's seed-1 trace was replayed against **7 fixed replicas, no scaler**
+(`make trace-check`), to check that k6 delivers the trace and the app keeps up at maximum
+scale. Results in `experiments/results/traces/`.
+
+| Trace | offered | sent | dropped | failed | p95 overall | p95 / p99 in the spike | tools node CPU, mean / max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| synthetic-s1 | 109,237 | 109,237 | 0 | 0 | 9.4 ms | 10.3 / 31.0 ms | 10 % / 57 % of a CPU |
+| wikipedia-s1 | 133,533 | 133,532 | 0 | 0 | 9.0 ms | 9.0 / 26.6 ms | 12 % / 66 % of a CPU ¹ |
+
+Per cycle, sent / offered was at least 0.9999 in both runs, and nothing was dropped or
+failed. (The synthetic run still had 100 pre-allocated VUs and never needed more.) The load generator is not the bottleneck: the tools node stayed far from
+saturation.
+
+¹ One sample of 258 % at 1491 s, as k6 finished and built its summary; every other sample
+was below 67 %.
+
+A first Wikipedia run with 100 pre-allocated VUs (`check-wikipedia-s1-prealloc100.*`)
+dropped 7 of 133,533 requests: k6 needed 102 VUs, and starting VUs mid-run is slow enough to
+miss a few scheduled iterations. Its spike also had p95 / p99 of 30 / 294 ms, with 12 % of
+CFS periods throttled on the web pods at ~31 RPS per pod. The re-run with 200 pre-allocated
+VUs had neither, so the tail was mostly run-to-run noise (laptop scheduling) on top of the
+burstiness described above. `trace.js` now pre-allocates 200 VUs.
+
+Reproduce: `make traces`, then `make trace-check TRACE=synthetic-s1` (25 min).
