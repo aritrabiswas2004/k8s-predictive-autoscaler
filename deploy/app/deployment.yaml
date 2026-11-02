@@ -49,15 +49,24 @@ spec:
             limits:
               cpu: 500m
               memory: 128Mi
+          # Probes must tolerate overload. Phase 2 calibration at 70 RPS on one pod: /healthz
+          # took > 1 s (the default timeout), the kubelet restarted the container, and with
+          # the 30 s startup delay the Service had no endpoints. Under-provisioned arms would
+          # be punished by probe restarts instead of by latency, so: readiness only drops a
+          # pod after ~6 s unresponsive, liveness only restarts after ~60 s. Neither affects
+          # time-to-Ready (successThreshold 1) or draining (terminating endpoints are removed
+          # on deletion, not by the probe).
           readinessProbe:
             httpGet:
               path: /ready
               port: http
             periodSeconds: 2
-            failureThreshold: 1
+            timeoutSeconds: 2
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 10
-            failureThreshold: 3
+            timeoutSeconds: 5
+            failureThreshold: 6

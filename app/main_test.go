@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestReadyHandler(t *testing.T) {
@@ -54,5 +58,45 @@ func TestLogRequestsRecordsStatus(t *testing.T) {
 				t.Errorf("status = %d, want %d", rec.Code, tt.want)
 			}
 		})
+	}
+}
+
+// A request queued behind a busy slot must be counted on arrival, and must give up without
+// burning CPU when its client goes away.
+func TestWorkHandlerQueue(t *testing.T) {
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{} // the only slot is busy
+	handler := workHandler(1, slots)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/work", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	before := testutil.ToFloat64(requestsReceived)
+	done := make(chan struct{})
+	go func() { handler(rec, req); close(done) }()
+
+	// Wait until the request is counted and queued, then hang up.
+	deadline := time.Now().Add(time.Second)
+	for testutil.ToFloat64(requestsQueued) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("request never queued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := testutil.ToFloat64(requestsReceived) - before; got != 1 {
+		t.Errorf("received = %v while queued, want 1", got)
+	}
+	cancel()
+	<-done
+
+	if rec.Code != statusClientClosed {
+		t.Errorf("status = %d, want %d", rec.Code, statusClientClosed)
+	}
+	if q := testutil.ToFloat64(requestsQueued); q != 0 {
+		t.Errorf("queued = %v after hang-up, want 0", q)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("abandoned request did work: body %q", rec.Body.String())
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"syscall"
@@ -45,7 +46,15 @@ var (
 		Name: "http_requests_received_total",
 		Help: "Work requests received, counted on arrival.",
 	})
+
+	requestsQueued = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "work_requests_queued",
+		Help: "Work requests waiting for a free worker slot.",
+	})
 )
+
+// statusClientClosed is nginx's non-standard 499: the client gave up before we answered.
+const statusClientClosed = 499
 
 type statusRecorder struct {
 	http.ResponseWriter
@@ -97,9 +106,29 @@ func burnCPU(iterations int) [32]byte {
 	return sum
 }
 
-func workHandler(iterations int) http.HandlerFunc {
+// workHandler burns CPU for each request, but only in as many goroutines at once as there
+// are slots. Without the limit an overloaded pod runs hundreds of CPU-burning goroutines on
+// a 0.5-CPU quota, which starves everything else in the process: the accept loop (so
+// arrivals stop being counted), /metrics (so scrapes time out and the scaler goes blind)
+// and the probes (so the pod is restarted). Measured in Phase 2. Waiting on the channel
+// costs no CPU, so with the limit those stay responsive and overload shows up where it
+// should: as queueing latency.
+func workHandler(iterations int, slots chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestsReceived.Inc()
+		requestsReceived.Inc() // before the queue, so it counts offered load
+
+		requestsQueued.Inc()
+		select {
+		case slots <- struct{}{}:
+			requestsQueued.Dec()
+			defer func() { <-slots }()
+		case <-r.Context().Done():
+			// The client gave up while queued: don't spend CPU on an answer nobody reads.
+			requestsQueued.Dec()
+			w.WriteHeader(statusClientClosed)
+			return
+		}
+
 		if _, err := fmt.Fprintf(w, "Result: %x\n", burnCPU(iterations)); err != nil {
 			log.Printf("write response for %s: %v", r.URL.Path, err)
 		}
@@ -122,10 +151,14 @@ func main() {
 	iterations := envInt("WORK_ITERATIONS", 300000)
 	startupDelay := time.Duration(envInt("STARTUP_DELAY_SECONDS", 30)) * time.Second
 	drainDelay := time.Duration(envInt("SHUTDOWN_DRAIN_SECONDS", 5)) * time.Second
+	// GOMAXPROCS follows the container CPU limit (2 for 500m), and burning CPU in more
+	// goroutines than can run at once only adds contention.
+	concurrency := envInt("WORK_CONCURRENCY", runtime.GOMAXPROCS(0))
+	slots := make(chan struct{}, concurrency)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", workHandler(iterations))
-	mux.HandleFunc("GET /work", workHandler(iterations))
+	mux.HandleFunc("GET /{$}", workHandler(iterations, slots))
+	mux.HandleFunc("GET /work", workHandler(iterations, slots))
 
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("GET /ready", readyHandler)
@@ -148,7 +181,8 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("Listening on http://localhost:%d (iterations=%d, startup delay=%v)", port, iterations, startupDelay)
+		log.Printf("Listening on http://localhost:%d (iterations=%d, concurrency=%d, startup delay=%v)",
+			port, iterations, concurrency, startupDelay)
 		// ErrServerClosed is the normal result of Shutdown, not a failure.
 		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server: %v", err)
