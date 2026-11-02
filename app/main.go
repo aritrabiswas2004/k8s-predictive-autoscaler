@@ -30,6 +30,14 @@ var (
 		Help:    "HTTP request latency in seconds.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"method", "route"})
+
+	// Counted when a /work request arrives, before any CPU is spent. http_requests_total
+	// only counts finished requests, so under overload (client timeouts) it under-reports
+	// load exactly when load is highest. Scalers and the forecaster read this one instead.
+	requestsReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "http_requests_received_total",
+		Help: "Work requests received, counted on arrival.",
+	})
 )
 
 type statusRecorder struct {
@@ -84,6 +92,7 @@ func burnCPU(iterations int) [32]byte {
 
 func workHandler(iterations int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		requestsReceived.Inc()
 		if _, err := fmt.Fprintf(w, "Result: %x\n", burnCPU(iterations)); err != nil {
 			log.Printf("write response for %s: %v", r.URL.Path, err)
 		}
