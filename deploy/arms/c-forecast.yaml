@@ -1,0 +1,55 @@
+# Arm C: forecast only. Scales on the forecaster's upper bound for the peak arrival rate
+# 60-120 s ahead (seasonal naive, chosen in Phase 4: as good as or better than Holt-Winters
+# in every backtest), desired replicas = ceil(forecast / 40). The forecast already includes
+# the scale-up lag (LEAD = startup delay + 30 s, docs/methodology.md#forecaster), so pods
+# are meant to be Ready when the load arrives. Nothing reacts to load the forecast missed:
+# that is arm D.
+#
+# max(...): forecast_rps carries pod/instance labels, so a restarted forecaster is a new
+# series; the aggregation also turns the vector into the single value KEDA requires.
+#
+# No forecast, no guess. When the forecaster exports nothing (cold start, dead, or its last
+# forecast is past its window), the query returns an empty result. ignoreNullValues "false"
+# makes that a scaler error instead of a silent 0 (which would hold 2 replicas through any
+# load); after failureThreshold consecutive errors KEDA steers the HPA to fallback.replicas.
+# Fallback is maxReplicaCount: blind, provision for the worst case (under-provisioning costs
+# more than over-provisioning). Phase 8 kills the forecaster on purpose to measure this.
+#
+# Same min/max and behavior as every other arm (experiments/arms.py check).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: web-c
+  labels:
+    pa/arm: c
+spec:
+  scaleTargetRef:
+    name: web
+  minReplicaCount: 2
+  maxReplicaCount: 7
+  fallback:
+    failureThreshold: 3
+    replicas: 7
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - {type: Percent, value: 100, periodSeconds: 15}
+            - {type: Pods, value: 4, periodSeconds: 15}
+        scaleDown:
+          stabilizationWindowSeconds: 120
+          selectPolicy: Max
+          policies:
+            - {type: Percent, value: 100, periodSeconds: 15}
+  triggers:
+    - type: prometheus
+      name: forecast
+      metricType: AverageValue
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: max(forecast_rps{model="naive",bound="upper"})
+        threshold: "40"
+        ignoreNullValues: "false"

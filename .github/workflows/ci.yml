@@ -65,10 +65,11 @@ jobs:
           cache-dependency-path: forecaster/requirements*.txt
       # Includes a check that the committed traces in loadtest/trace/out/ match the generator.
       - run: make test-trace
+      - run: make test-experiments
       - run: pip install -r forecaster/requirements-dev.txt
       - run: make test-forecaster PY=python
       - name: Analysis scripts compile
-        run: python -m py_compile experiments/analysis/*.py loadtest/trace/*.py forecaster/backtest/*.py
+        run: python -m py_compile experiments/*.py experiments/analysis/*.py loadtest/trace/*.py forecaster/backtest/*.py
 
   scripts:
     name: Shell and k6 scripts

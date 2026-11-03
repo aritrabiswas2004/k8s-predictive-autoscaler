@@ -1,0 +1,8 @@
+# metrics-server: the resource metrics API (metrics.k8s.io) that arm A's CPU HPA reads.
+# Runs on the tools node like the rest of the monitoring stack.
+nodeSelector:
+  role: tools
+# kind's kubelets serve self-signed certificates.
+args:
+  - --kubelet-insecure-tls
+# The chart's defaultArgs already set --metric-resolution=15s, the HPA sync period.

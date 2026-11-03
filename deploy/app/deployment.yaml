@@ -5,7 +5,8 @@ metadata:
   labels:
     app: web
 spec:
-  replicas: 1
+  # No replicas field: the arm's scaler owns the replica count (experiments/arms.py resets it
+  # between arms). With one here, every kubectl apply would reset it under a running scaler.
   selector:
     matchLabels:
       app: web

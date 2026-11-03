@@ -1,0 +1,54 @@
+# Arm D: forecast + arrivals. The HPA computes desired replicas for each trigger and takes
+# the highest: the forecast scales up ahead of the load it expects, the arrival rate
+# (exactly arm R100) catches load the forecast missed, such as the spike.
+#
+# A missing forecast is not an error here (ignoreNullValues defaults to "true"; the empty
+# result reads as 0), so with the forecaster cold or dead D behaves exactly like R100.
+# Fallback only applies when the scalers themselves fail (Prometheus unreachable): then both
+# triggers fail, and KEDA's fallback covers the whole ScaledObject.
+#
+# Same min/max and behavior as every other arm (experiments/arms.py check). Both triggers use
+# the threshold of R100 (RPS_PER_POD = 40) and the queries of C and R100.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: web-d
+  labels:
+    pa/arm: d
+spec:
+  scaleTargetRef:
+    name: web
+  minReplicaCount: 2
+  maxReplicaCount: 7
+  fallback:
+    failureThreshold: 3
+    replicas: 7
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - {type: Percent, value: 100, periodSeconds: 15}
+            - {type: Pods, value: 4, periodSeconds: 15}
+        scaleDown:
+          stabilizationWindowSeconds: 120
+          selectPolicy: Max
+          policies:
+            - {type: Percent, value: 100, periodSeconds: 15}
+  triggers:
+    - type: prometheus
+      name: forecast
+      metricType: AverageValue
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: max(forecast_rps{model="naive",bound="upper"})
+        threshold: "40"
+    - type: prometheus
+      name: arrivals
+      metricType: AverageValue
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: sum(rate(http_requests_received_total{app="web"}[1m]))
+        threshold: "40"

@@ -99,6 +99,13 @@ class TraceTest(unittest.TestCase):
             _, t = make(workload, "--seed", seed, "--out", str(f))
             self.assertEqual(json.loads(f.read_text()), t, f.name)
 
+    def test_committed_smoke_trace_is_current(self):
+        # Same arguments as SMOKE_ARGS in the Makefile (make traces).
+        f = Path(__file__).parent / "out" / "smoke.json"
+        _, t = make("synthetic", "--seed", "1", "--cycles", "2", "--history-cycles", "1",
+                    "--spike-rps", "0", "--out", str(f))
+        self.assertEqual(json.loads(f.read_text()), t)
+
 
 if __name__ == "__main__":
     unittest.main()

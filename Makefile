@@ -1,4 +1,4 @@
-.PHONY: build run clean test test-trace test-forecaster image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest
+.PHONY: build run clean test test-trace test-forecaster test-experiments image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest arm arm-clear arm-status arm-check arm-smoke
 
 IMAGE ?= predictive-autoscaling-app:dev
 FORECASTER_IMAGE ?= predictive-autoscaling-forecaster:dev
@@ -8,6 +8,7 @@ PY ?= .venv/bin/python
 # Pinned chart versions (reproducibility).
 KPS_VERSION  := 92.17.0
 KEDA_VERSION := 2.21.0
+METRICS_SERVER_VERSION := 3.14.0
 
 build:
 	cd app/ && go build -o ../bin/pa .
@@ -18,7 +19,7 @@ run:
 clean:
 	rm -rf ./bin
 
-test: test-trace test-forecaster
+test: test-trace test-forecaster test-experiments
 	cd app/ && go test ./...
 
 test-trace:
@@ -26,6 +27,10 @@ test-trace:
 
 test-forecaster:
 	$(PY) -m pytest forecaster
+
+# Cluster-free checks of the scaling arms (deploy/arms/); make arm-check is the full one.
+test-experiments:
+	python3 -m unittest discover -s experiments -q
 
 image:
 	docker build -t $(IMAGE) app/
@@ -44,12 +49,16 @@ up:
 	./deploy/kind/up.sh
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
 	helm repo add kedacore https://kedacore.github.io/charts --force-update
+	helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ --force-update
 	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
 		--version $(KPS_VERSION) --namespace monitoring --create-namespace \
 		-f deploy/monitoring/values.yaml --wait --timeout 10m
 	helm upgrade --install keda kedacore/keda \
 		--version $(KEDA_VERSION) --namespace keda --create-namespace \
 		-f deploy/keda/values.yaml --wait --timeout 5m
+	helm upgrade --install metrics-server metrics-server/metrics-server \
+		--version $(METRICS_SERVER_VERSION) --namespace kube-system \
+		-f deploy/metrics-server/values.yaml --wait --timeout 5m
 
 # Python tooling: analysis plots and the forecaster (tests, backtest).
 venv: .venv/bin/python
@@ -78,11 +87,15 @@ lag:
 
 # Phase 3: load traces. Deterministic: the same seed always gives the same file.
 TRACE_SEEDS ?= 1 2 3 4 5
+# Short trace for smoke tests of the arms: 2 cycles (10 min), no spike. One cycle of history
+# is the least that lets arm C forecast anything (seasonal naive repeats the previous cycle).
+SMOKE_ARGS := --seed 1 --cycles 2 --history-cycles 1 --spike-rps 0
 traces:
 	for s in $(TRACE_SEEDS); do \
 		python3 loadtest/trace/generate.py synthetic --seed $$s --out loadtest/trace/out/synthetic-s$$s.json && \
 		python3 loadtest/trace/generate.py wikipedia --seed $$s --out loadtest/trace/out/wikipedia-s$$s.json || exit 1; \
 	done
+	python3 loadtest/trace/generate.py synthetic $(SMOKE_ARGS) --out loadtest/trace/out/smoke.json
 
 trace-plot: venv
 	.venv/bin/python loadtest/trace/plot.py --out docs/img/traces.png
@@ -112,6 +125,28 @@ forecaster-deploy: forecaster-image
 # Rolling-origin backtest of the models on every trace and on the recorded runs.
 backtest: venv
 	$(PY) forecaster/backtest/backtest.py --plot docs/img/backtest.png
+
+# Phase 5: scaling arms (deploy/arms/): a, r100, r80, r60, c, d. One at a time, never two.
+ARM ?= r100
+arm:
+	$(PY) experiments/arms.py apply $(ARM)
+
+arm-clear:
+	$(PY) experiments/arms.py clear
+
+arm-status:
+	$(PY) experiments/arms.py status
+
+# The arms differ only in signal and threshold (same min/max, behavior, queries).
+arm-check:
+	$(PY) experiments/arms.py check
+
+# Apply one arm and replay the 10-minute smoke trace against it.
+SMOKE_OUT ?= experiments/results/arms/smoke-$(ARM)
+arm-smoke: arm
+	K6_FILES=trace.json=loadtest/trace/out/smoke.json ./loadtest/run-k6.sh loadtest/k6/trace.js \
+		$(SMOKE_OUT) RUN_ID=smoke-$(ARM)
+	$(PY) experiments/arms.py status
 
 down:
 	kind delete cluster --name pa

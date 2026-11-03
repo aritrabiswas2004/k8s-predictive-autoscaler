@@ -1,0 +1,42 @@
+# Arm R60: reactive KEDA on the arrival rate, target 60 % of RPS_PER_POD (40 RPS) per pod,
+# i.e. desired replicas = ceil(arrivals / 24). R100, R80 and R60 differ only in the threshold:
+# lower targets buy headroom with replicas, and together they draw the reactive cost/SLO curve.
+#
+# Arrivals (http_requests_received_total) are counted when a request arrives, before it is
+# queued, so the signal does not depend on how well this arm is keeping up.
+# Same min/max and behavior as every other arm (experiments/arms.py check). No
+# pollingInterval: in KEDA 2.21 it only matters for scaling to and from zero; for 1..N the
+# HPA controller asks KEDA's metrics server every 15 s (its sync period).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: web-r60
+  labels:
+    pa/arm: r60
+spec:
+  scaleTargetRef:
+    name: web
+  minReplicaCount: 2
+  maxReplicaCount: 7
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - {type: Percent, value: 100, periodSeconds: 15}
+            - {type: Pods, value: 4, periodSeconds: 15}
+        scaleDown:
+          stabilizationWindowSeconds: 120
+          selectPolicy: Max
+          policies:
+            - {type: Percent, value: 100, periodSeconds: 15}
+  triggers:
+    - type: prometheus
+      name: arrivals
+      metricType: AverageValue
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: sum(rate(http_requests_received_total{app="web"}[1m]))
+        threshold: "24"

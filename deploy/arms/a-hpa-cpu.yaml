@@ -1,0 +1,40 @@
+# Arm A: the default most teams start with. Plain HPA on CPU utilization, 70 % of the
+# 500m request (= 350m per pod; at ~8.5 ms of CPU per request that is ~41 RPS, close to
+# R100's 40, but measured on CPU, which flattens out when the pod is saturated).
+#
+# Every arm has the same min/max and the same behavior block (experiments/arms.py check
+# compares them). The behavior is the Kubernetes default except for the scale-down
+# stabilization window: 120 s instead of 300 s, scaled to the 300 s cycle.
+# Needs metrics-server (installed by make up).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-a
+  labels:
+    pa/arm: a
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 2
+  maxReplicas: 7
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 15}
+        - {type: Pods, value: 4, periodSeconds: 15}
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      selectPolicy: Max
+      policies:
+        - {type: Percent, value: 100, periodSeconds: 15}
