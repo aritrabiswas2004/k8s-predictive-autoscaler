@@ -22,6 +22,9 @@ section.
 | `rate[1m]` delay | the arrival series trails real arrivals by **≈ 28 s** | [forecaster](#what-it-forecasts-and-how-far-ahead) |
 | Forecast window | peak over **[now + 60 s, now + 120 s]** (LEAD = startup delay + 30 s) | [forecaster](#what-it-forecasts-and-how-far-ahead) |
 | Forecast upper bound | one-sided **90 %** | [forecaster](#models) |
+| Model the scalers read | **seasonal naive** | [decision](#decision-arms-c-and-d-scale-on-seasonal-naive) |
+| Scale-down stabilization | **120 s** in every arm; otherwise the Kubernetes default behaviour | [scaling arms](#scaling-arms) |
+| Fallback (arms C, D) | **7** replicas after 3 failed scaler polls | [scaling arms](#when-the-forecast-disappears) |
 
 ## Setup
 
@@ -378,7 +381,7 @@ backtest call the same code (`window.predict`).
 
 A made-up number is never exported. When the forecaster has nothing valid, the series is
 absent, so arm D's reactive trigger decides alone, and arm C falls back to KEDA's `fallback`
-(Phase 5).
+([verified](#when-the-forecast-disappears)).
 
 | situation | what is exported |
 |---|---|
@@ -505,10 +508,130 @@ Reproduce: `make forecaster-deploy`, then
 with Prometheus port-forwarded, then
 `.venv/bin/python experiments/analysis/forecast_shadow.py experiments/results/forecaster/shadow-synthetic-s1 --plot ...`.
 
-### Open decision: the model for arms C and D
+### Decision: arms C and D scale on seasonal naive
 
-The plan's example uses Holt-Winters. The backtest does not favour it. It ties with seasonal
+The plan's example used Holt-Winters. The backtest does not favour it: it ties with seasonal
 naive on the synthetic workload, loses on Wikipedia, and its upper bound is miscalibrated.
-The options are seasonal naive (simpler, as good or better), Holt-Winters (as planned), or
-both (C and D run once per model, doubling those runs). Both models are exported in shadow
-mode either way.
+Arms C and D therefore read `forecast_rps{model="naive",bound="upper"}` (decided
+2026-11-03). Holt-Winters is still exported and scored in every run, so the comparison
+between the models continues on the experiment's own data.
+
+## Scaling arms
+
+One scaler per arm in `deploy/arms/`, switched by `experiments/arms.py` (`make arm ARM=...`):
+
+| Arm | Manifest | Scaler | Signal | Target per pod |
+|---|---|---|---|---|
+| A | `a-hpa-cpu.yaml` | HPA | CPU utilization (metrics-server) | 70 % of the 500m request |
+| R100 | `r100.yaml` | KEDA | arrivals | 40 RPS |
+| R80 | `r80.yaml` | KEDA | arrivals | 32 RPS |
+| R60 | `r60.yaml` | KEDA | arrivals | 24 RPS |
+| C | `c-forecast.yaml` | KEDA | forecast | 40 RPS |
+| D | `d-hybrid.yaml` | KEDA | max(forecast, arrivals) | 40 RPS each |
+
+Arrivals are `sum(rate(http_requests_received_total{app="web"}[1m]))` and the forecast is
+`max(forecast_rps{model="naive",bound="upper"})`. All KEDA triggers are `AverageValue`, so
+each asks for `ceil(signal / target)` replicas, and with two triggers the HPA takes the
+higher count. At about 8.5 ms of CPU per request, arm A's 350m target corresponds to about
+41 RPS per pod, close to R100, but CPU stops rising once a pod saturates, and arrivals do
+not.
+
+**What is the same in every arm** (`make arm-check` compares the parsed manifests; the
+cluster-free `make test-experiments` compares them as text, in CI):
+
+- `minReplicas` 2, `maxReplicas` 7.
+- The HPA `behavior`, written out in full: the Kubernetes default (scale up by up to 100 %
+  or 4 pods per 15 s, no scale-up stabilization) except for a **120 s** scale-down
+  stabilization window instead of 300 s, scaled to the 300 s cycle.
+- The HPA controller's 15 s sync and its default 10 % tolerance.
+- No `pollingInterval`. KEDA 2.21 warns that it only matters for scaling to or from zero;
+  from 1 to N replicas the HPA's sync asks KEDA's metrics server, which queries Prometheus
+  then (see [scale-up lag](#scale-up-lag)).
+- The resources of `web` and its Service. `deploy/app/deployment.yaml` no longer sets
+  `replicas`, so re-applying it can't reset the count under a running scaler.
+
+**Switching arms.** `arms.py apply ARM` deletes every ScaledObject and HPA that targets `web`
+(ScaledObjects first, so KEDA removes the HPA it owns), waits until none is left, scales
+`web` to 2 and waits until exactly two pods are Ready and none is terminating, then waits
+until the arrival rate is below 1 RPS. The last step matters because the reactive signal is
+a 1-minute rate. Applied right after load, a new scaler would start from the previous run's
+traffic. Only then is the new manifest applied, and the arm counts as active once its HPA
+reports `ScalingActive`.
+
+Arm A needs the resource metrics API, which kind does not ship. `make up` installs
+metrics-server 0.9.0 (chart 3.14.0) on the tools node with `--kubelet-insecure-tls`
+(kind's kubelets use self-signed certificates) and the chart's 15 s metric resolution.
+
+### When the forecast disappears
+
+`experiments/check_failsafe.py` applies arm C or D, scales the forecaster to 0 for about
+150 s, starts it again, and logs the scaler every 5 s (`experiments/results/arms/failsafe-*.log`,
+no load):
+
+| | C (forecast only) | D (forecast + arrivals) |
+|---|---|---|
+| trigger setting | `ignoreNullValues: "false"`: an empty result is a scaler error | default `"true"`: an empty result reads as 0 |
+| forecaster stopped | t = 15 s | t = 15 s |
+| `forecast_rps` gone from Prometheus | t ≈ 48 s (staleness after the target disappears) | t ≈ 48 s |
+| what the HPA sees | the old value until t ≈ 55 s, then no metric; KEDA `Fallback=True` at t ≈ 90 s | forecast metric 0 from t ≈ 59 s; arrivals trigger unchanged |
+| replicas | desired 7 at t ≈ 90 s, 7 at t ≈ 105 s | unchanged (scaled on arrivals alone) |
+| forecaster started | t = 173 s; forecast back at t ≈ 188 s; `Fallback=False` at t ≈ 194 s | forecast back at t ≈ 183 s |
+
+So with the forecaster dead, C asks for the maximum about 75 s later (the forecast series
+going stale, then three failed polls) and has it about 15 s after that, and D behaves exactly
+like R100. The forecast returns
+within 15 s of a restart because the history lives in Prometheus, not in the forecaster.
+Fallback is 7 (`maxReplicaCount`): with no forecast, C can only guess, and
+under-provisioning costs more than over-provisioning. D's fallback only applies when its
+scalers fail (Prometheus unreachable), because KEDA 2.21 applies a fallback to the whole
+ScaledObject. Phase 8 repeats the kill under load.
+
+### Smoke runs
+
+Acceptance check: every arm must change the replica count under load. `make arm-smoke
+ARM=...` applies the arm and replays `loadtest/trace/out/smoke.json`: synthetic seed 1,
+2 cycles of 300 s, no spike, 30–150 RPS (one cycle of history is the least that gives
+seasonal naive something to repeat). The runs went back to back in the order R100, A, R80,
+R60, D, C.
+
+| Arm | Requests / offered | Dropped | p95 cycle 1 | p95 cycle 2 | p99 (run) | Ready pods | Cycle 2 scale-up (load > 80 RPS at 400 s) |
+|---|---:|---:|---:|---:|---:|---|---|
+| A | 40053 / 40268 | 215 | 14 ms | 3114 ms | 3784 ms | 2–4 | 3rd pod ready at 480 s, 4th at 540 s |
+| R100 | 40046 / 40268 | 222 | 10 ms | 3855 ms | 4183 ms | 2–4 | 495 s, 525 s |
+| R80 | 40085 / 40268 | 183 | 15 ms | 2994 ms | 3316 ms | 2–4 | 480 s, 495 s |
+| R60 | 40101 / 40268 | 167 | 14 ms | 2414 ms | 3328 ms | 2–5 | 465 s, then 5 pods at 480 s |
+| C | 40268 / 40268 | 0 | 9 ms | 9 ms | 11 ms | 2–5 | 4 pods ready at 375 s |
+| D | 40268 / 40268 | 0 | 9 ms | 9 ms | 17 ms | 2–5 | 4 pods ready at 375 s |
+
+(Pod times come from kube-state-metrics at 15 s resolution. `experiments/results/arms/smoke-*.timeline.json`
+also has replica-seconds and the time spent with fewer ready pods than the offered load
+needs at 40 RPS per pod.)
+
+![Smoke runs](img/arms-smoke.png)
+
+*Grey: after the trace. The scaler stays active there, and the next arm's reset can show up
+in it (R60's panel ends with arm D starting).*
+
+What this shows, and what it doesn't:
+
+- **Every arm scales**, up and back down after the 120 s stabilization. In cycle 2 the
+  reactive arms have their next pod ready 65–95 s after the load passes two pods' target
+  (80 RPS), which matches the [measured lag](#scale-up-lag). Until then two pods take up to
+  150 RPS, beyond their ~108 RPS knee, and requests queue for seconds. C and D have four pods
+  ready about 25 s before the load rises. Arm A tracks R100 closely, as its target predicts.
+  Cycle 1 peaks near 105 RPS, which two pods still carry, so every arm meets the SLO there.
+- **This is not the evaluation.** It is one run per arm, in a fixed order, without the three
+  clean history cycles. In particular, C and D's first cycle was forecast from **the
+  previous smoke run's second cycle** (the same trace, run minutes before), which is why they
+  jumped to 5 pods at t = 45 s for a cycle that peaked near 105 RPS. The real runs (Phase 6)
+  start every arm after three history cycles of the same trace, rotate the order, and repeat.
+- **k6 dropped iterations under overload.** When latency rose to seconds, k6 had to start
+  VUs mid-run (up to 367–415 of the 3000 allowed) and dropped 167–222 requests in the
+  reactive arms while doing so. They count as offered but not sent, and the evaluation will
+  report them, not hide them.
+- Tools-node CPU stayed at a median of 8–11 % (max 112 % of 6 CPUs' 600 %) during the runs.
+
+Reproduce: `make arm-smoke ARM=r100` (and each other arm), then
+`.venv/bin/python experiments/analysis/arm_timeline.py experiments/results/arms/smoke-{a,r100,r80,r60,c,d} --plot docs/img/arms-smoke.png`
+(it fetches each run's series from Prometheus once, then reads the saved `.series.json`), and
+`.venv/bin/python experiments/check_failsafe.py c --out ...`.

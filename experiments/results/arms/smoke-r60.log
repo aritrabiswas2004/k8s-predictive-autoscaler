@@ -1,0 +1,5 @@
+time="2026-11-03T01:41:48Z" level=info msg="TRACE_START=1793670108476" source=console
+
+===SUMMARY-BEGIN===
+{"config":{"TARGET":"http://web.default.svc.cluster.local/work","trace":"smoke","workload":"synthetic","seed":1,"run":"smoke-r60","max_vus":3000,"no_connection_reuse":true},"offered":40268,"requests":40101,"dropped":167,"vus_max":367,"failed_rate":0,"p50_ms":7.777291,"p95_ms":1678.168043,"p99_ms":3327.940668,"max_ms":3747.239377,"history":{"requests":17722,"failed_rate":0,"p50_ms":7.744667,"p95_ms":14.401491649999972,"p99_ms":105.21424024999999,"max_ms":302.542375},"scored":{"requests":22379,"failed_rate":0,"p50_ms":7.8285,"p95_ms":2413.8460073999972,"p99_ms":3568.91118326,"max_ms":3747.239377},"spike":{"requests":0,"failed_rate":0,"p50_ms":0,"p95_ms":0,"p99_ms":0,"max_ms":0},"cycles":[{"requests":17722,"failed_rate":0,"p50_ms":7.744667,"p95_ms":14.401491649999972,"p99_ms":105.21424024999999,"max_ms":302.542375,"cycle":0,"offered":17722,"sent_ratio":1},{"requests":22379,"failed_rate":0,"p50_ms":7.8285,"p95_ms":2413.8460073999972,"p99_ms":3568.91118326,"max_ms":3747.239377,"cycle":1,"offered":22546,"sent_ratio":0.9925929211390047}]}
+===SUMMARY-END===

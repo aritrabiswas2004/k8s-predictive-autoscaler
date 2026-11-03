@@ -1,0 +1,14 @@
+{
+ "arm": "a",
+ "requests": 40053,
+ "offered": 40268,
+ "dropped": 215,
+ "failed_rate": 0,
+ "p95_ms": 2728.7514097999997,
+ "p99_ms": 3783.5483788799997,
+ "replicas_min": 2.0,
+ "replicas_max": 4.0,
+ "replica_changes": 4,
+ "replica_seconds": 1605.0,
+ "short_seconds": 165.0
+}

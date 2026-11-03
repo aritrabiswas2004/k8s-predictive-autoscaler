@@ -12,11 +12,12 @@ setup a new pod starts serving **60–75 s after a load step**
 answer is to start the pods before the load arrives.
 
 > **Status:** work in progress. Done so far: the cluster, the demo app, the capacity
-> calibration, the load traces and the forecaster (with a backtest of its accuracy). The
-> scaling arms and the evaluation are next. There are no autoscaling results yet, so nothing
-> here claims the prediction helps; the evaluation will show whether, and when, it does.
+> calibration, the load traces, the forecaster (with a backtest of its accuracy) and the six
+> scaling arms, each checked on a short smoke trace. The experiment harness and the
+> evaluation are next. There are no evaluation results yet, so nothing here claims the
+> prediction helps; the evaluation will show whether, and when, it does.
 
-## How it works (the forecaster runs; scaling on it is the next phase)
+## How it works
 
 ```
          ┌─────────────────────────── scales ────────────────────────────┐
@@ -38,7 +39,8 @@ answer is to start the pods before the load arrives.
    60–120 s ahead, which is the time a new pod takes to start serving plus a margin
    ([why](docs/methodology.md#what-it-forecasts-and-how-far-ahead)). Pods must be ready
    before the load and stay up through it, so it forecasts the peak, not the load at one
-   moment.
+   moment. The scalers read the seasonal naive forecast, which did as well or better in the
+   [backtest](#forecast-accuracy-backtest); Holt-Winters is still exported and scored.
 3. **KEDA scales on the forecast and on current load.** One ScaledObject has two triggers,
    the forecast and the current arrival rate, and the HPA follows whichever asks for more
    pods. The forecast scales ahead of predictable load. The reactive trigger catches what
@@ -58,6 +60,10 @@ sequence, from the same starting state:
 | R100 / R80 / R60 | Reactive KEDA on arrivals, targeting 100 / 80 / 60 % of a pod's capacity |
 | C | Forecast only, no reactive trigger |
 | **D** | **The predictive autoscaler: forecast + reactive** |
+
+Every arm has the same replica bounds (2–7) and the same scaling behaviour (scale-down
+stabilization 120 s), and only one scaler is ever attached to the app
+([manifests](deploy/arms/), [details](docs/methodology.md#scaling-arms)).
 
 - **SLO:** client-side p95 latency < 300 ms, measured by k6 (it includes queueing, which
   server-side metrics miss). The score is the number of minutes in violation.
@@ -121,10 +127,13 @@ real Wikipedia traffic.
 | `deploy/monitoring/`, `deploy/keda/` | Helm values for kube-prometheus-stack and KEDA |
 | `deploy/app/` | Deployment, Service, PodDisruptionBudget, ServiceMonitor |
 | `deploy/calibration/` | ScaledObject used by the lag measurement |
+| `deploy/arms/` | One scaler per arm: the CPU HPA (A) and the KEDA ScaledObjects (R100, R80, R60, C, D) |
+| `deploy/metrics-server/` | Helm values for metrics-server (CPU metrics for arm A) |
 | `forecaster/` | Forecaster in Python: models (seasonal naive, Holt-Winters), service, tests, backtest, Dockerfile |
 | `deploy/forecaster/` | Forecaster Deployment, Service, ServiceMonitor, Grafana dashboard |
 | `loadtest/trace/` | Trace generator (synthetic and Wikipedia), its tests, the raw Wikipedia data and the generated traces |
 | `loadtest/k6/`, `loadtest/*.sh` | k6 scripts (trace player, calibration, load step) and the scripts that run k6 inside the cluster |
+| `experiments/arms.py` | Switches arms: removes the old scaler, resets the replicas, waits for idle, applies the new one; also checks that the arms differ only where they should |
 | `experiments/analysis/` | Python analysis and plots |
 | `experiments/results/` | Raw results of every run that the docs cite |
 | `docs/` | Methodology and figures |
@@ -137,11 +146,11 @@ real Wikipedia traffic.
 - k6 runs inside the cluster, so it does not need to be installed locally.
 
 ```sh
-make up          # kind cluster + kube-prometheus-stack + KEDA (pinned chart versions)
+make up          # kind cluster + kube-prometheus-stack + KEDA + metrics-server (pinned charts)
 make deploy      # build the app image, load it into kind, deploy it
 make status      # nodes, CPU allocatable, pods
 
-make test        # Go unit tests, trace generator tests, forecaster tests (needs make venv)
+make test        # Go, trace generator, forecaster and arm-manifest tests (needs make venv)
 make calibrate   # stepped load against one pod  -> knee and RPS_PER_POD
 make lag         # one 25 -> 100 RPS step with reactive KEDA -> scale-up lag breakdown
 
@@ -150,6 +159,11 @@ make trace-check TRACE=synthetic-s1   # replay a trace at 7 fixed replicas, no s
 
 make forecaster-deploy   # build the forecaster image, load it into kind, deploy it
 make backtest            # forecast accuracy on every trace -> experiments/results/backtest/
+
+make arm ARM=r100        # switch the scaler: a, r100, r80, r60, c or d (one at a time)
+make arm-status          # active scaler, replicas and its current metric values
+make arm-check           # the arms differ only in signal and threshold
+make arm-smoke ARM=d     # apply an arm and replay the 10-minute smoke trace against it
 
 make down        # delete the cluster
 ```
@@ -166,7 +180,7 @@ The analysis scripts use the virtualenv that `make venv` creates.
   k6 trace player
 - [x] **Phase 4**: forecaster (seasonal naive and Holt-Winters, exports the forecast peak
   for KEDA) and its backtest
-- [ ] **Phase 5**: scaling arms (HPA, reactive KEDA at three headroom levels, forecast, hybrid)
+- [x] **Phase 5**: scaling arms (HPA, reactive KEDA at three headroom levels, forecast, hybrid)
 - [ ] **Phase 6**: experiment harness (repeated runs, arm order rotated between repetitions)
 - [ ] **Phase 7**: analysis: cost vs. SLO-violation frontier, startup-delay sweep
 - [ ] **Phase 8**: fault injection (kill the forecaster mid-run; the fallback should keep the service healthy)
