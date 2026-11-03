@@ -9,6 +9,7 @@ section.
 | Constant | Value | Source |
 |---|---|---|
 | SLO | client-side p95 < **300 ms** | fixed before calibration, kept |
+| SLO-violation minute | a scored minute with p95 > 300 ms, or > 5 % of its offered requests failed or unsent | [harness](#what-a-run-is-scored-on) |
 | Pod resources | 500m CPU, 128Mi (request = limit) | `deploy/app/deployment.yaml` |
 | `WORK_ITERATIONS` | **150000** (≈ 8.5 ms of CPU per request) | [capacity](#capacity) |
 | `WORK_CONCURRENCY` | GOMAXPROCS = **2** for a 500m limit | [overload behaviour](#overload-behaviour-two-fixes) |
@@ -635,3 +636,110 @@ Reproduce: `make arm-smoke ARM=r100` (and each other arm), then
 `.venv/bin/python experiments/analysis/arm_timeline.py experiments/results/arms/smoke-{a,r100,r80,r60,c,d} --plot docs/img/arms-smoke.png`
 (it fetches each run's series from Prometheus once, then reads the saved `.series.json`), and
 `.venv/bin/python experiments/check_failsafe.py c --out ...`.
+
+## Experiment harness
+
+`experiments/run_experiment.py` runs the grids, one run at a time, and saves the raw data of
+every run. `experiments/metrics.py` turns it into one summary row. Both use only the Python
+standard library and kubectl.
+
+| Grid | Runs | Arms | Traces | Startup delay | Wall time |
+|---|---:|---|---|---|---|
+| `main` | 60 | A, R100, R80, R60, C, D | synthetic and wikipedia, seeds 1–5 | 30 s | ~29 h |
+| `sweep` | 18 | R100, R80, D | synthetic, seeds 1–3 | 0 s and 60 s (30 s comes from `main`) | ~9 h |
+| `smoke` | 6 | all | `smoke` (2 cycles, no spike) | 30 s | ~1.5 h |
+
+**Repetitions.** Repetition r replays trace seed r, so within a repetition every arm gets the
+identical trace, cycle variation and spike, and the repetitions differ in both the run and
+the trace. The arm order rotates by one position per repetition (no arm goes first twice
+for the same workload), and the workload order alternates. Every k6 start is delayed by
+0–15 s, derived from the run id (deterministic, recorded), so runs don't all start at the
+same phase of the HPA's 15 s sync ([why](#scale-up-lag)).
+
+**One run**, in order:
+
+1. Pre-flight: all nodes Ready, no k6 pod running, the forecaster has at least 2 cycles of
+   history (after a cluster rebuild that takes 10 minutes).
+2. Startup delay: if the run's delay differs from the cluster's, set `STARTUP_DELAY_SECONDS`
+   on `web` and `LEAD_SECONDS = delay + 30` on the forecaster
+   ([why](#what-it-forecasts-and-how-far-ahead)), and wait for both rollouts and for the
+   forecaster to report the new lead. The sweep's runs are grouped by delay, so it changes 3
+   times in 18 runs.
+3. `arms.py apply ARM`: remove the previous scaler, 2 Ready pods, arrivals below 1 RPS, apply
+   the arm, wait for its HPA to be active ([switching arms](#scaling-arms)).
+4. Jitter, then k6 replays the trace (`loadtest/run-k6.sh`, `loadtest/k6/trace.js`).
+5. The arm stays active for another 120 s, so the series show the scale-down after the load.
+6. Save the Prometheus series from 60 s before the trace to 120 s after it, then remove the
+   scaler.
+
+The history cycles also serve as warm-up. Every arm starts at 2 pods, and by the first scored
+minute the forecaster's 3-cycle window holds only this run's own traffic.
+
+**Resumable and unattended.** `make experiment GRID=main` runs every run whose `run.json` does
+not say `ok`, so re-running it continues the grid; `ONLY=` (a regex on the run id) and
+`LIMIT=` cut it into batches. A failed run is recorded with its error and redone next time.
+After two failures in a row the harness stops rather than burn a night. `caffeinate` keeps
+macOS from sleeping. Ctrl-C marks the current run failed and removes its scaler.
+
+**Saved per run** (`experiments/results/runs/<trace>-d<delay>-<arm>/`, smoke runs under
+`results/smoke/`):
+
+| File | Content |
+|---|---|
+| `run.json` | metadata (arm, trace, seed, delay, lead, repetition, position, jitter, git SHA and whether the tree was dirty, Helm chart versions, Kubernetes version, timestamps, trace start) and the summary row |
+| `k6.json`, `k6.log` | k6 summary (overall, per cycle, history/scored, spike and **per minute**) and its log |
+| `k6.docker-stats.csv` | CPU of the three kind node containers every few seconds |
+| `series.json` | 15 s Prometheus series: arrivals, served rate, pods (existing, Ready, desired by the Deployment and by the HPA), CPU used and CFS throttling, queued requests, server-side p95, and both models' forecasts with their timestamps and lead/window |
+
+The series are on the epoch-aligned 15 s grid the forecaster itself uses, so Phase 7 can
+score each forecast on exactly the samples it was made for
+([shadow-mode lesson](#shadow-mode-replay)).
+
+### What a run is scored on
+
+Everything is over the scored cycles (the last 2 of 5) unless stated. `make summarize`
+recomputes every row from the saved files.
+
+- **SLO-violation minutes.** k6 tags every request with the minute of the trace it was sent
+  in and reports each minute's p95 exactly, because it keeps every sample of a trend. This
+  settles the question left open in Phase 3 in favour of k6's own per-request data, which
+  is aggregated per minute inside k6 so no per-request file has to leave the pod. The
+  remote-written quantiles are cumulative over the run and can't give this.
+  A minute violates the SLO if its p95 is over 300 ms, **or** if more than 5 % of the
+  requests the trace offered in it failed or were never sent (k6 drops iterations when it
+  can't start VUs fast enough). A failed or unsent request is an infinitely slow one, and
+  with more than 5 % of them the minute's true p95 is over any limit, however fast the
+  rest were. This adds failures to the plan's "p95 < 300 ms" rather than changing it.
+- **Latency and errors.** Scored p95 and p99, failed rate, dropped iterations, the spike's p95.
+- **Cost.** Pod-seconds (pods that exist, Ready or not: a starting pod is paid for) and
+  CPU-core-seconds requested (× 0.5). Phase 7 prices them at a stated reference price.
+- **Efficiency.** Mean CPU utilization (used / requested) and mean over-provisioning, i.e.
+  Ready pods minus `ceil(offered / 40)` with the offered load taken from the trace. Also
+  the seconds with fewer Ready pods than that.
+- **Stability.** Replica-count changes of the Deployment.
+- **Noise.** Median and maximum CPU of the app and tools node containers, to spot a run on
+  which the laptop was busy.
+- **Forecast quality** is computed in Phase 7 from the saved forecasts, with the scoring of
+  the [shadow-mode replay](#shadow-mode-replay).
+
+### Smoke grid
+
+Acceptance check: `make experiment-smoke` ran all six arms through the harness unattended
+(2026-11-03, 1 h 23 min including 10 min of forecaster warm-up on a fresh cluster) and wrote
+every file above. Scored cycle = the smoke trace's second cycle, minutes 5–9.
+
+| Arm | SLO-violation minutes | Scored p95 | Dropped | Pod-seconds | CPU utilization | Over-provisioning | Under-provisioned |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A | 1 of 5 (minute 7) | 2389 ms | 140 | 765 | 46 % | +0.15 pods | 120 s |
+| R100 | 1 of 5 (minute 7) | 3043 ms | 127 | 915 | 38 % | +0.60 | 105 s |
+| R80 | 1 of 5 (minute 7) | 2469 ms | 134 | 1050 | 33 % | +0.95 | 75 s |
+| R60 | 1 of 5 (minute 7) | 2036 ms | 136 | 1185 | 30 % | +1.40 | 75 s |
+| C | 0 of 5 | 9 ms | 0 | 1305 | 27 % | +1.90 | 0 s |
+| D | 0 of 5 | 9 ms | 0 | 1155 | 31 % | +1.50 | 0 s |
+
+(`experiments/results/smoke/summary.csv`.) The pipeline works, and the rows already have the
+shape the evaluation is about: more headroom buys fewer bad seconds at more pod-seconds,
+and the question is whether C and D sit below the reactive arms' curve. One run per arm
+can't answer that. As in the [arm smoke runs](#smoke-runs), C and D's first cycle was also
+forecast from the previous run of the same trace. The main grid answers it with 5
+repetitions, 3 history cycles and rotated order.

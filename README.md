@@ -12,9 +12,9 @@ setup a new pod starts serving **60–75 s after a load step**
 answer is to start the pods before the load arrives.
 
 > **Status:** work in progress. Done so far: the cluster, the demo app, the capacity
-> calibration, the load traces, the forecaster (with a backtest of its accuracy) and the six
-> scaling arms, each checked on a short smoke trace. The experiment harness and the
-> evaluation are next. There are no evaluation results yet, so nothing here claims the
+> calibration, the load traces, the forecaster (with a backtest of its accuracy), the six
+> scaling arms and the experiment harness that runs them. The experiment runs and their
+> analysis are next. There are no evaluation results yet, so nothing here claims the
 > prediction helps; the evaluation will show whether, and when, it does.
 
 ## How it works
@@ -66,7 +66,9 @@ stabilization 120 s), and only one scaler is ever attached to the app
 ([manifests](deploy/arms/), [details](docs/methodology.md#scaling-arms)).
 
 - **SLO:** client-side p95 latency < 300 ms, measured by k6 (it includes queueing, which
-  server-side metrics miss). The score is the number of minutes in violation.
+  server-side metrics miss). The score is the number of scored minutes in violation: a
+  minute violates it if its p95 is over 300 ms or more than 5 % of its requests failed or
+  were never sent ([details](docs/methodology.md#experiment-harness)).
 - **Cost:** replica-seconds, priced at a stated reference instance price.
 - **The fair competitor is over-provisioning.** Any autoscaler violates the SLO less if it
   runs more pods. The reactive arms at three headroom levels trace a cost vs. SLO-violation
@@ -133,6 +135,7 @@ real Wikipedia traffic.
 | `deploy/forecaster/` | Forecaster Deployment, Service, ServiceMonitor, Grafana dashboard |
 | `loadtest/trace/` | Trace generator (synthetic and Wikipedia), its tests, the raw Wikipedia data and the generated traces |
 | `loadtest/k6/`, `loadtest/*.sh` | k6 scripts (trace player, calibration, load step) and the scripts that run k6 inside the cluster |
+| `experiments/run_experiment.py`, `experiments/metrics.py` | The experiment harness (grids, runs, raw data per run) and the per-run summary metrics |
 | `experiments/arms.py` | Switches arms: removes the old scaler, resets the replicas, waits for idle, applies the new one; also checks that the arms differ only where they should |
 | `experiments/analysis/` | Python analysis and plots |
 | `experiments/results/` | Raw results of every run that the docs cite |
@@ -165,6 +168,12 @@ make arm-status          # active scaler, replicas and its current metric values
 make arm-check           # the arms differ only in signal and threshold
 make arm-smoke ARM=d     # apply an arm and replay the 10-minute smoke trace against it
 
+make experiment-smoke              # every arm once on the smoke trace (~1.5 h)
+make experiment-plan GRID=main     # the runs of a grid and which are done
+make experiment GRID=main          # run what is not done yet (main ~29 h, sweep ~9 h)
+make experiment GRID=main ONLY=wikipedia LIMIT=6   # a batch
+make summarize GRID=main           # recompute summary.csv from the raw files
+
 make down        # delete the cluster
 ```
 
@@ -181,6 +190,7 @@ The analysis scripts use the virtualenv that `make venv` creates.
 - [x] **Phase 4**: forecaster (seasonal naive and Holt-Winters, exports the forecast peak
   for KEDA) and its backtest
 - [x] **Phase 5**: scaling arms (HPA, reactive KEDA at three headroom levels, forecast, hybrid)
-- [ ] **Phase 6**: experiment harness (repeated runs, arm order rotated between repetitions)
+- [x] **Phase 6**: experiment harness (repeated runs, arm order rotated between repetitions)
+- [ ] Experiment runs: main grid (60 runs) and startup-delay sweep (18 runs)
 - [ ] **Phase 7**: analysis: cost vs. SLO-violation frontier, startup-delay sweep
 - [ ] **Phase 8**: fault injection (kill the forecaster mid-run; the fallback should keep the service healthy)
