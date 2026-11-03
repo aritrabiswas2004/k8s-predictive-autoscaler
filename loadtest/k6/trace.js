@@ -9,9 +9,11 @@
 // docs/methodology.md). New connections spread every request across the ready pods, like
 // traffic from many independent clients. The same setting is used for every arm.
 //
-// Every request is tagged with its cycle, part (history or scored) and whether it falls in
-// the spike, so the summary and the remote-written metrics can be split by them. Global tags
-// workload/run label all k6 series in Prometheus.
+// Every request is tagged with its cycle, part (history or scored), whether it falls in the
+// spike, and its minute of the trace, so the summary can be split by them. The per-minute
+// groups give SLO-violation minutes: k6 keeps every sample of a trend, so each minute's p95
+// is exact (the remote-written quantiles are cumulative over the run and can't give this).
+// Global tags workload/run label all k6 series in Prometheus.
 //
 // Env: TARGET, TRACE (default /scripts/trace.json), RUN_ID, MAX_VUS.
 
@@ -22,6 +24,7 @@ const TARGET = __ENV.TARGET || 'http://web.default.svc.cluster.local/work';
 const trace = JSON.parse(open(__ENV.TRACE || '/scripts/trace.json'));
 const STEP = trace.step_seconds;
 const CYCLE = trace.cycle_seconds;
+const MINUTES = Math.ceil(trace.duration_seconds / 60);
 const MAX_VUS = Number(__ENV.MAX_VUS || 3000);
 
 // k6 takes integer rates per timeUnit. The trace has one decimal, so count per 10 s.
@@ -32,6 +35,7 @@ const thresholds = {};
 // Always-passing thresholds: they only make k6 report these sub-metrics in the summary.
 const groups = [];
 for (let c = 0; c < trace.num_cycles; c++) groups.push(`cycle:${c}`);
+for (let m = 0; m < MINUTES; m++) groups.push(`minute:${m}`);
 groups.push('part:history', 'part:scored', 'spike:y');
 for (const g of groups) {
   thresholds[`http_req_duration{${g}}`] = ['p(95)>=0'];
@@ -74,6 +78,7 @@ export default function () {
       cycle: String(cycle),
       part: cycle < trace.history_cycles ? 'history' : 'scored',
       spike: inSpike ? 'y' : 'n',
+      minute: String(Math.min(Math.floor(t / 60), MINUTES - 1)),
     },
   });
 }
@@ -114,6 +119,14 @@ export function handleSummary(data) {
     g.sent_ratio = g.offered ? g.requests / g.offered : null;
     cycles.push(g);
   }
+  // Requests by the minute they were sent in; offered - requests = dropped in that minute.
+  const minutes = [];
+  for (let m = 0; m < MINUTES; m++) {
+    const g = group(data, `minute:${m}`);
+    g.minute = m;
+    g.offered = Math.round(offered(m * 60, Math.min((m + 1) * 60, trace.duration_seconds)));
+    minutes.push(g);
+  }
   const d = data.metrics.http_req_duration.values;
   const vus = data.metrics.vus_max ? data.metrics.vus_max.values.max : null;
   const out = {
@@ -129,6 +142,7 @@ export function handleSummary(data) {
     scored: group(data, 'part:scored'),
     spike: group(data, 'spike:y'),
     cycles,
+    minutes,
   };
   return { stdout: `\n===SUMMARY-BEGIN===\n${JSON.stringify(out)}\n===SUMMARY-END===\n` };
 }

@@ -1,4 +1,4 @@
-.PHONY: build run clean test test-trace test-forecaster test-experiments image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest arm arm-clear arm-status arm-check arm-smoke
+.PHONY: build run clean test test-trace test-forecaster test-experiments image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest arm arm-clear arm-status arm-check arm-smoke experiment experiment-smoke experiment-plan summarize
 
 IMAGE ?= predictive-autoscaling-app:dev
 FORECASTER_IMAGE ?= predictive-autoscaling-forecaster:dev
@@ -147,6 +147,29 @@ arm-smoke: arm
 	K6_FILES=trace.json=loadtest/trace/out/smoke.json ./loadtest/run-k6.sh loadtest/k6/trace.js \
 		$(SMOKE_OUT) RUN_ID=smoke-$(ARM)
 	$(PY) experiments/arms.py status
+
+# Phase 6: the experiment harness (experiments/run_experiment.py). GRID = main | sweep | smoke.
+# Resumable: finished runs are skipped, so re-running the same command continues a grid.
+# ONLY / LIMIT select runs, e.g. make experiment GRID=main ONLY=wikipedia LIMIT=12.
+# caffeinate keeps macOS from sleeping during a batch (it is skipped where it doesn't exist).
+GRID  ?= main
+ONLY  ?=
+LIMIT ?=
+CAFFEINATE := $(shell command -v caffeinate >/dev/null && echo caffeinate -is)
+experiment:
+	$(CAFFEINATE) $(PY) experiments/run_experiment.py run $(GRID) \
+		$(if $(ONLY),--only='$(ONLY)') $(if $(LIMIT),--limit $(LIMIT))
+
+# One run per arm on the 10-minute smoke trace (about 1.5 h): checks the whole pipeline.
+experiment-smoke:
+	$(CAFFEINATE) $(PY) experiments/run_experiment.py run smoke
+
+experiment-plan:
+	$(PY) experiments/run_experiment.py plan $(GRID) $(if $(ONLY),--only='$(ONLY)')
+
+# Recompute every summary row from the saved raw files (no cluster needed).
+summarize:
+	$(PY) experiments/run_experiment.py summarize $(GRID)
 
 down:
 	kind delete cluster --name pa
