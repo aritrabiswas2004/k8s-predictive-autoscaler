@@ -1,4 +1,4 @@
-.PHONY: build run clean test test-trace test-forecaster test-experiments image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest arm arm-clear arm-status arm-check arm-smoke experiment experiment-smoke experiment-plan summarize
+.PHONY: build run clean test test-trace test-forecaster test-experiments image load deploy up down status venv calibrate lag traces trace-plot trace-check forecaster-image forecaster-deploy backtest arm arm-clear arm-status arm-check arm-smoke experiment experiment-smoke experiment-plan summarize analyze
 
 IMAGE ?= predictive-autoscaling-app:dev
 FORECASTER_IMAGE ?= predictive-autoscaling-forecaster:dev
@@ -170,6 +170,12 @@ experiment-plan:
 # Recompute every summary row from the saved raw files (no cluster needed).
 summarize:
 	$(PY) experiments/run_experiment.py summarize $(GRID)
+
+# Every table and figure of the evaluation from the saved runs (no cluster needed):
+# docs/results-tables.md, docs/img/{frontier,sweep,timeline-*,forecast-live}.png and
+# experiments/results/analysis/runs.csv. Works on a partial grid; every number states its n.
+analyze: venv
+	$(PY) experiments/analysis/analyze.py
 
 down:
 	kind delete cluster --name pa

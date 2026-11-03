@@ -743,3 +743,65 @@ and the question is whether C and D sit below the reactive arms' curve. One run 
 can't answer that. As in the [arm smoke runs](#smoke-runs), C and D's first cycle was also
 forecast from the previous run of the same trace. The main grid answers it with 5
 repetitions, 3 history cycles and rotated order.
+
+## Analysis
+
+`make analyze` (`experiments/analysis/analyze.py`, numbers in
+`experiments/analysis/evaluation.py`) turns the saved runs into every table and figure of the
+evaluation: `docs/results-tables.md` (generated, not edited by hand), `docs/img/frontier.png`,
+`sweep.png`, `timeline-synthetic.png`, `timeline-wikipedia.png`, `forecast-live.png`, and one
+row per run in `experiments/results/analysis/runs.csv`. It needs no cluster, works on a
+partial grid, and states how many runs every number rests on. Each row is recomputed with the
+harness's own summary code (`experiments/metrics.py`), and a test checks that it reproduces
+the smoke grid's `summary.csv`.
+
+**Statistics.** A cell is one workload × arm × startup delay; its values are the repetitions.
+Each mean comes with a 95 % Student-t interval (t = 2.776 for 5 repetitions). Repetition r
+replays seed r, so the interval covers run-to-run noise *and* the difference between traces.
+Arms are compared **paired**, within a repetition, where both saw the identical trace. A
+difference counts only when its 95 % interval excludes 0; otherwise the tables say "within
+noise". Five repetitions can't resolve small differences, and the tables don't pretend to.
+
+**The frontier test.** In each repetition, R100, R80 and R60 give three (pod-seconds,
+SLO-violation minutes) points, joined in order of cost. An arm's **gap** is its violation
+minutes minus the frontier's value at the arm's cost. Negative means fewer violations than
+over-provisioning buys for the same money. Two edge rules, both conservative:
+
+- Below R100's cost the frontier is flat at R100's violations. A cheaper arm must also
+  violate less to count.
+- Above R60's cost it is undefined (the gap is not counted, and the table says how often
+  this happened). Nothing was measured there, and holding the frontier flat would credit an
+  arm for simply running more pods than R60.
+
+An arm is **below the frontier** when the 95 % interval of its gaps is entirely below 0. The
+same test is repeated with under-provisioned seconds as the measure. This is a continuous,
+capacity-based check of the minute count, which is coarse with only 10 scored minutes.
+
+**Cost.** Pod-seconds are priced at the **AWS Fargate** on-demand price (Linux/x86, US East
+(N. Virginia), listed on [aws.amazon.com/fargate/pricing](https://aws.amazon.com/fargate/pricing/)
+on 2026-11-03): $0.000011244 per vCPU-second plus $0.000001235 per GB-second. A pod requests
+0.5 vCPU and 128 MiB. Fargate's smallest size with 0.5 vCPU has 1 GB, so a pod-second costs
+$0.000006857 ($0.0247 per pod-hour). The price only rescales the cost axis; no comparison
+depends on it.
+
+**What else is reported.**
+
+- The spike: violation minutes in the minutes that overlap the spike or the minute after it
+  (2–3 minutes, depending on where the seed puts the spike), and the spike's p95 and failed
+  share. This tests hypothesis H3.
+- Latency is capped by k6's 10 s request timeout. A request slower than 10 s counts as
+  failed, so a run's p95 and p99 can't exceed 10 000 ms. Under heavy overload they stop
+  separating arms; the violation minutes and the share of failed or unsent requests don't.
+- Live forecast accuracy: every forecast made in the scored cycles of every run, scored on
+  exactly the samples its window covered ([as in the backtest](#backtest)), spike windows
+  excluded. It is reported per model next to the backtest's numbers.
+- Noise: node-container CPU across runs.
+
+**Timelines** show one repetition (seed 1, `--seed` to change it) with every arm on the same
+trace. Each arm has offered load, arrivals, the forecast, ready and requested capacity, and
+each minute's client p95 with violating minutes in red.
+
+**Colours.** Reactive arms are one blue ramp (light to dark = more headroom), D is orange, C
+aqua and A grey. Each has its own marker shape, and every point is labelled directly. Blue,
+orange and aqua pass the all-pairs colour-vision-deficiency check of the palette validator
+used.

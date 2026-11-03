@@ -173,6 +173,7 @@ make experiment-plan GRID=main     # the runs of a grid and which are done
 make experiment GRID=main          # run what is not done yet (main ~29 h, sweep ~9 h)
 make experiment GRID=main ONLY=wikipedia LIMIT=6   # a batch
 make summarize GRID=main           # recompute summary.csv from the raw files
+make analyze                       # every table and figure from the saved runs -> docs/
 
 make down        # delete the cluster
 ```
