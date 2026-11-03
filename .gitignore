@@ -5,3 +5,6 @@ build/
 bin/
 .venv/
 __pycache__/
+
+# LaTeX report (Overleaf); local only for now.
+/paper/
