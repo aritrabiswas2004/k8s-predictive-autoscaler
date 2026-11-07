@@ -2,6 +2,8 @@
 
 import collections
 import math
+import time
+import types
 import unittest
 
 import metrics
@@ -51,8 +53,22 @@ class GridTest(unittest.TestCase):
         changes = sum(a.delay != b.delay for a, b in zip(runs, runs[1:]))
         self.assertEqual(changes, 3)
 
+    def test_fault_grid(self):
+        runs = rx.grid_runs("fault")
+        self.assertEqual(len(runs), 2 * 2 * 3)
+        self.assertEqual({r.arm for r in runs}, {"c", "d"})
+        self.assertEqual({r.delay for r in runs}, {30})
+        self.assertEqual({r.fault for r in runs}, {"kill"})
+        self.assertTrue(all(r.run_id.endswith("-kill") for r in runs))
+        # Every fault run has a no-fault twin in the main grid: same trace, arm and delay.
+        twins = {r.run_id for r in rx.grid_runs("main")}
+        for r in runs:
+            self.assertIn(r.run_id.removesuffix("-kill"), twins)
+        self.assertEqual(rx.grid_dir("fault").name, "fault")
+        self.assertEqual(rx.grid_runs("main")[0].fault, "")  # old run ids are unchanged
+
     def test_traces_exist(self):
-        for g in ("main", "sweep", "smoke"):
+        for g in ("main", "sweep", "smoke", "fault"):
             for r in rx.grid_runs(g):
                 self.assertTrue((rx.TRACES / f"{r.trace}.json").exists(), r.trace)
 
@@ -60,6 +76,60 @@ class GridTest(unittest.TestCase):
         r = rx.grid_runs("smoke")[0]
         self.assertEqual(rx.jitter(r), rx.jitter(r))
         self.assertTrue(all(0 <= rx.jitter(x) < 15 for x in rx.grid_runs("main")))
+
+
+class FaultTest(unittest.TestCase):
+    """ForecasterKill against a fake cluster: kubectl, the k6 log and Prometheus are stubs."""
+
+    def setUp(self):
+        self.calls, self.replicas, self.made = [], 1, 0.0
+        self.saved = rx.subprocess.run, rx.arms.kubectl, rx.arms.query, rx.log
+        self.t0 = time.time() + 0.3  # the trace starts 0.3 s from now
+
+        def run(cmd, **kw):  # kubectl logs k6
+            return types.SimpleNamespace(stdout=f"x\nTRACE_START={int(self.t0 * 1000)}\n")
+
+        def kubectl(*args, stdin=None):
+            self.calls.append((round(time.time() - self.t0, 1), args[0], args[-1]))
+            if args[0] == "scale":
+                self.replicas = int(args[-1].split("=")[1])
+            if args[0] == "rollout":
+                self.made = time.time() + 0.05  # the restarted forecaster forecasts at once
+            if args[0] == "get":
+                return "pod/forecaster-1" if self.replicas else ""
+            return ""
+
+        rx.subprocess.run, rx.arms.kubectl = run, kubectl
+        rx.arms.query = lambda q: self.made or None
+        rx.log = lambda msg: None
+        rx.ForecasterKill.poll_every = 0.05
+
+    def tearDown(self):
+        rx.subprocess.run, rx.arms.kubectl, rx.arms.query, rx.log = self.saved
+        rx.ForecasterKill.poll_every = 2.0
+
+    def test_kill_and_restart(self):
+        f = rx.ForecasterKill(at=0.2, down=0.3)
+        f.start()
+        f.join(timeout=15)
+        self.assertFalse(f.is_alive())
+        self.assertIsNone(f.error)
+        e = {k: v - self.t0 for k, v in f.events.items()}
+        self.assertEqual(list(e), ["kill", "gone", "restart", "ready", "back"])
+        self.assertAlmostEqual(e["kill"], 0.2, delta=0.15)
+        self.assertAlmostEqual(e["restart"] - e["kill"], 0.3, delta=0.15)
+        scales = [c[2] for c in self.calls if c[1] == "scale"]
+        self.assertEqual(scales, ["--replicas=0", "--replicas=1"])
+
+    def test_old_trace_start_is_ignored(self):
+        self.t0 = time.time() - 3600  # the previous run's k6 pod
+        f = rx.ForecasterKill(at=0.0, down=0.1)
+        f.start()
+        time.sleep(0.3)
+        f.stop.set()
+        f.join(timeout=5)
+        self.assertEqual(f.events, {})
+        self.assertFalse(any(c[1] == "scale" for c in self.calls))
 
 
 class MetricsTest(unittest.TestCase):

@@ -10,6 +10,9 @@ Grids:
   sweep  arms R100, R80, D x synthetic seeds 1-3 x startup delay 0 and 60 s (the 30 s runs
          are the main grid's)
   smoke  every arm once on the 10-minute smoke trace (make experiment-smoke)
+  fault  Phase 8: arms C and D x synthetic/wikipedia seeds 1-3, startup delay 30 s, with the
+         forecaster stopped (scaled to 0) at the start of the first scored cycle, just before
+         its ramp, for FAULT_DOWN seconds. The paired no-fault runs are the main grid's.
 
 Repetition r uses trace seed r, so within a repetition every arm gets the identical trace and
 spike, and the repetitions differ in both the run and the trace. The arm order is rotated by
@@ -21,7 +24,9 @@ wait for the forecaster to have 2 cycles of history -> experiments/arms.py apply
 old scaler, 2 Ready pods, arrivals ~0, new scaler) -> jitter -> k6 replays the trace ->
 keep the arm for TAIL more seconds -> save the Prometheus series -> remove the scaler.
 Resumable: a run whose run.json says "ok" is skipped. Raw files per run in
-experiments/results/<runs|smoke>/<run_id>/; the summary row is metrics.summarize().
+experiments/results/<runs|smoke|fault>/<run_id>/; the summary row is metrics.summarize().
+A fault run also records when the forecaster went down and came back (run.json
+"fault_events", in trace seconds) and fails if the fault was not injected.
 """
 
 import argparse
@@ -34,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
@@ -51,6 +57,8 @@ ARMS = ["a", "r100", "r80", "r60", "c", "d"]
 LEAD_MARGIN = 30  # forecaster LEAD = startup delay + 30 s (docs/methodology.md#forecaster)
 MIN_HISTORY = 600  # seconds: 2 cycles, the forecaster's min_history_cycles
 PROXY = "/api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy"
+FORECASTER = ("-n", "monitoring", "deployment/forecaster")
+FAULT_DOWN = 180  # seconds the forecaster stays down in a fault run (from the kill request)
 
 # Saved for every run (15 s steps on the epoch grid, like the forecaster's own queries).
 SERIES = {
@@ -75,6 +83,10 @@ SERIES = {
     "forecast_made_at": "max by (model) (forecast_last_success_timestamp_seconds)",
     "forecast_lead": "max(forecast_lead_seconds)",
     "forecast_window": "max(forecast_window_seconds)",
+    # Phase 8: is the forecaster scraped, and the stale-forecast alert (deploy/forecaster/
+    # alerts.yaml) by state; 1 while pending or firing, no samples otherwise.
+    "forecaster_up": 'max(up{namespace="monitoring",service="forecaster"})',
+    "forecast_stale_alert": 'max by (alertstate) (ALERTS{alertname="ForecastStale"})',
 }
 
 
@@ -86,10 +98,11 @@ class Run:
     delay: int
     rep: int
     order: int  # position in the grid
+    fault: str = ""  # "" or "kill" (the forecaster is stopped mid-run, grid fault)
 
     @property
     def run_id(self):
-        return f"{self.trace}-d{self.delay}-{self.arm}"
+        return f"{self.trace}-d{self.delay}-{self.arm}" + (f"-{self.fault}" if self.fault else "")
 
 
 def rotate(xs, k):
@@ -112,13 +125,20 @@ def grid_runs(grid):
                     runs.append((arm, f"synthetic-s{rep}", delay, rep))
     elif grid == "smoke":
         runs = [(arm, "smoke", 30, 1) for arm in ARMS]
+    elif grid == "fault":
+        for rep in range(1, 4):
+            workloads = ["synthetic", "wikipedia"] if rep % 2 else ["wikipedia", "synthetic"]
+            for w in workloads:
+                for arm in rotate(["c", "d"], rep - 1):
+                    runs.append((arm, f"{w}-s{rep}", 30, rep))
     else:
         raise SystemExit(f"unknown grid {grid}")
-    return [Run(grid, a, t, d, r, i) for i, (a, t, d, r) in enumerate(runs)]
+    fault = "kill" if grid == "fault" else ""
+    return [Run(grid, a, t, d, r, i, fault) for i, (a, t, d, r) in enumerate(runs)]
 
 
 def grid_dir(grid):
-    return REPO / "experiments/results" / ("smoke" if grid == "smoke" else "runs")
+    return REPO / "experiments/results" / {"smoke": "smoke", "fault": "fault"}.get(grid, "runs")
 
 
 def run_dir(run):
@@ -178,6 +198,83 @@ def preflight():
               1200, every=15)
 
 
+# --- Phase 8: the forecaster-kill fault ---------------------------------------------------
+
+def forecaster_pods():
+    return arms.kubectl("get", "pods", "-n", "monitoring", "-l", "app=forecaster",
+                        "-o", "name").strip()
+
+
+def start_forecaster():
+    """Scale the forecaster back to 1 and wait for it (also the cleanup after a fault run)."""
+    arms.kubectl("scale", *FORECASTER, "--replicas=1")
+    arms.kubectl("rollout", "status", *FORECASTER, "--timeout=300s")
+
+
+class ForecasterKill(threading.Thread):
+    """Stops the forecaster (scale to 0) at trace second `at`, starts it `down` s later.
+
+    The trace start comes from the k6 pod's log (TRACE_START, printed by the first
+    iteration); a value from before this thread started belongs to the previous run's pod.
+    events (wall-clock times): kill (scale to 0 sent), gone (no forecaster pod left),
+    restart (scale to 1 sent), ready (rollout done), back (Prometheus has a forecast made
+    after the restart).
+    """
+
+    poll_every = 2.0  # seconds between checks (the tests shorten it)
+
+    def __init__(self, at, down):
+        super().__init__(daemon=True)
+        self.at, self.down = at, down
+        self.events, self.error, self.stop = {}, None, threading.Event()
+        self.created = time.time()
+
+    def trace_start(self):
+        while not self.stop.is_set():
+            r = subprocess.run(["kubectl", "-n", "loadtest", "logs", "k6"],
+                               capture_output=True, text=True)
+            m = re.search(r"TRACE_START=(\d+)", r.stdout)
+            if m and int(m.group(1)) / 1000 > self.created - 60:
+                return int(m.group(1)) / 1000
+            self.stop.wait(self.poll_every)
+        return None
+
+    def until(self, t):
+        """Wait until wall time t; False if stopped first."""
+        return not self.stop.wait(max(0.0, t - time.time()))
+
+    def poll(self, what, ok, timeout):
+        end = time.time() + timeout
+        while not self.stop.is_set():
+            if ok():
+                return time.time()
+            if time.time() > end:
+                raise RuntimeError(f"fault: timed out waiting for {what}")
+            self.stop.wait(self.poll_every)
+        raise RuntimeError(f"fault: stopped while waiting for {what}")
+
+    def run(self):
+        try:
+            t0 = self.trace_start()
+            if t0 is None or not self.until(t0 + self.at):
+                return
+            log(f"fault: stopping the forecaster at trace second {self.at}")
+            self.events["kill"] = time.time()
+            arms.kubectl("scale", *FORECASTER, "--replicas=0")
+            self.events["gone"] = self.poll("no forecaster pod", lambda: not forecaster_pods(), 120)
+            if not self.until(self.events["kill"] + self.down):
+                return
+            log("fault: starting the forecaster again")
+            self.events["restart"] = time.time()
+            start_forecaster()
+            self.events["ready"] = time.time()
+            made = "max(forecast_last_success_timestamp_seconds)"
+            self.events["back"] = self.poll(
+                "a new forecast", lambda: (arms.query(made) or 0) > self.events["restart"], 300)
+        except Exception as e:  # noqa: BLE001 - reported by execute(), which fails the run
+            self.error = e
+
+
 def query_range(promql, start, end, step=metrics.STEP):
     q = urllib.parse.urlencode({"query": promql, "start": start, "end": end, "step": step})
     body = json.loads(arms.kubectl("get", "--raw", f"{PROXY}/api/v1/query_range?{q}"))
@@ -225,17 +322,29 @@ def execute(run):
     meta["workload"] = trace["workload"]
     meta["seed"] = trace["seed"]
     (d / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    fault = None
     try:
         preflight()
         meta["lead_seconds"] = set_delay(run.delay)
         arms.apply(run.arm)
         meta["jitter_seconds"] = jitter(run)
         time.sleep(meta["jitter_seconds"])
+        if run.fault == "kill":
+            meta["fault_at_seconds"] = metrics.scored_window(trace)[0]
+            meta["fault_down_seconds"] = FAULT_DOWN
+            fault = ForecasterKill(meta["fault_at_seconds"], FAULT_DOWN)
+            fault.start()
         env = {**os.environ, "K6_FILES": f"trace.json={trace_file}"}
         subprocess.run([str(REPO / "loadtest/run-k6.sh"), str(REPO / "loadtest/k6/trace.js"),
                         str(d / "k6"), f"RUN_ID={run.run_id}"], env=env, check=True, cwd=REPO)
         t0 = int(re.search(r"TRACE_START=(\d+)", (d / "k6.log").read_text()).group(1)) / 1000
         meta["trace_start"] = t0
+        if fault:
+            fault.join(timeout=120)  # done long before the trace ends (at + down + ~1 min)
+            meta["fault_events"] = {k: round(v - t0, 1) for k, v in fault.events.items()}
+            if fault.error or fault.is_alive() or "back" not in fault.events:
+                raise RuntimeError(f"fault not injected as planned: {fault.error or 'timeout'} "
+                                   f"(events {meta['fault_events']})")
         remaining = t0 + trace["duration_seconds"] + TAIL - time.time()
         if remaining > 0:
             log(f"keeping arm {run.arm} for {remaining:.0f} s after the trace")
@@ -251,6 +360,12 @@ def execute(run):
         meta["traceback"] = traceback.format_exc()
         raise
     finally:
+        if fault:
+            fault.stop.set()
+            try:
+                start_forecaster()  # never leave it down for the next run
+            except Exception as e:  # noqa: BLE001
+                log(f"starting the forecaster after the run failed: {e}")
         (d / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
         try:
             arms.clear()
@@ -349,7 +464,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, fn in (("plan", cmd_plan), ("run", cmd_run), ("summarize", cmd_summarize)):
         p = sub.add_parser(name)
-        p.add_argument("grid", choices=["main", "sweep", "smoke"])
+        p.add_argument("grid", choices=["main", "sweep", "smoke", "fault"])
         p.add_argument("--only", help="regex on the run id, e.g. 'wikipedia' or '-d60-'")
         if name == "run":
             p.add_argument("--limit", type=int, help="stop after this many runs")

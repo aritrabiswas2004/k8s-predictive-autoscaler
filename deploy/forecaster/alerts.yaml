@@ -1,0 +1,39 @@
+# Phase 8: stale- and bad-forecast guards. Applied with the rest of deploy/forecaster/
+# (make forecaster-deploy); Prometheus picks up every PrometheusRule in the cluster
+# (ruleSelectorNilUsesHelmValues: false). Alertmanager is disabled, so the alerts show in
+# Prometheus only (ALERTS series, /alerts page); the harness saves ForecastStale per run.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: forecaster
+  namespace: monitoring
+  labels:
+    app: forecaster
+spec:
+  groups:
+    - name: forecaster
+      rules:
+        # The forecaster forecasts every 30 s. Stale: no successful forecast for 60 s (two
+        # missed rounds while the pod still runs, e.g. Prometheus queries failing), or no
+        # forecaster metrics at all (pod dead: its series go stale at the next scrape).
+        # While it fires, arm C runs on its fallback (7 pods) and arm D on arrivals only.
+        - alert: ForecastStale
+          expr: |
+            (time() - max(forecast_last_success_timestamp_seconds) > 60)
+            or absent(forecast_last_success_timestamp_seconds)
+          for: 15s
+          labels:
+            severity: warning
+          annotations:
+            summary: No fresh forecast for over 60 s; forecast-driven scaling is degraded.
+        # Accurate-looking but wrong: the forecaster runs, its forecasts miss. The rolling
+        # peak sMAPE stays at 3-6 % on Wikipedia and around 21 % on the noisier synthetic
+        # trace (docs/results-tables.md), so 40 % for 10 minutes is well outside normal.
+        # Not exercised by the forecaster-kill runs (a pattern shift would trigger it).
+        - alert: ForecastInaccurate
+          expr: max by (model) (forecast_smape{model="naive"}) > 0.4
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: The rolling peak sMAPE of the model arms C and D scale on is over 40 %.

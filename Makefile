@@ -148,7 +148,8 @@ arm-smoke: arm
 		$(SMOKE_OUT) RUN_ID=smoke-$(ARM)
 	$(PY) experiments/arms.py status
 
-# Phase 6: the experiment harness (experiments/run_experiment.py). GRID = main | sweep | smoke.
+# Phase 6: the experiment harness (experiments/run_experiment.py). GRID = main | sweep | smoke
+# | fault (Phase 8: the forecaster is stopped mid-run).
 # Resumable: finished runs are skipped, so re-running the same command continues a grid.
 # ONLY / LIMIT select runs, e.g. make experiment GRID=main ONLY=wikipedia LIMIT=12.
 # caffeinate keeps macOS from sleeping during a batch (it is skipped where it doesn't exist).
