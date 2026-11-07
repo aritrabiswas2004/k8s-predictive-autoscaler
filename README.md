@@ -11,11 +11,9 @@ setup a new pod starts serving **60–75 s after a load step**
 ([measured](docs/methodology.md#scale-up-lag)), and requests queue the whole time. The
 answer is to start the pods before the load arrives.
 
-> **Status:** work in progress. Done so far: the cluster, the demo app, the capacity
-> calibration, the load traces, the forecaster (with a backtest of its accuracy), the six
-> scaling arms and the experiment harness that runs them. The experiment runs and their
-> analysis are next. There are no evaluation results yet, so nothing here claims the
-> prediction helps; the evaluation will show whether, and when, it does.
+> **Status:** the evaluation is done: 78 runs, analysed ([results](#results)). Prediction
+> paid off on one workload and not on the other. Next: fault injection under load (kill
+> the forecaster mid-run).
 
 ## How it works
 
@@ -69,7 +67,8 @@ stabilization 120 s), and only one scaler is ever attached to the app
   server-side metrics miss). The score is the number of scored minutes in violation: a
   minute violates it if its p95 is over 300 ms or more than 5 % of its requests failed or
   were never sent ([details](docs/methodology.md#experiment-harness)).
-- **Cost:** replica-seconds, priced at a stated reference instance price.
+- **Cost:** pod-seconds, priced at AWS Fargate's on-demand rate (us-east-1, listed
+  2026-11-03) for a 0.5 vCPU / 1 GB pod: $0.0247 per pod-hour.
 - **The fair competitor is over-provisioning.** Any autoscaler violates the SLO less if it
   runs more pods. The reactive arms at three headroom levels trace a cost vs. SLO-violation
   curve, and the predictive autoscaler is only worth it if it lands **below that curve**:
@@ -83,6 +82,46 @@ stabilization 120 s), and only one scaler is ever attached to the app
 ![The two workloads](docs/img/traces.png)
 - The app runs on its own CPU-pinned node, so load generation and monitoring do not
   steal CPU from it.
+
+## Results
+
+78 runs: every arm 5 times on each workload (60 runs), plus a sweep of the pod start-up
+delay (18 runs). All tables: **[docs/results-tables.md](docs/results-tables.md)**, generated
+by `make analyze` from the raw data in [`experiments/results/runs/`](experiments/results/runs/).
+
+![Cost against SLO violations](docs/img/frontier.png)
+
+| Arm | Synthetic: violation min (of 10) | pod-s | Wikipedia: violation min (of 10) | pod-s |
+|---|---:|---:|---:|---:|
+| A (HPA, CPU) | 3.2 ± 0.6 | 1779 | 2.6 ± 1.1 | 1683 |
+| R100 | 2.8 ± 1.4 | 1926 | 2.0 ± 0.0 | 2040 |
+| R80 | 2.2 ± 1.4 | 2379 | 1.8 ± 0.6 | 2508 |
+| R60 | 2.0 ± 1.2 | 2910 | 0.2 ± 0.6 | 3039 |
+| C (forecast) | 0.6 ± 1.1 | 2319 | 2.0 ± 0.0 | 2007 |
+| **D (forecast + reactive)** | **0.2 ± 0.6** | 2517 | 2.0 ± 0.0 | 2220 |
+
+Mean ± 95 % interval over 5 repetitions; pod-seconds over the 10 scored minutes
+(1926 pod-s ≈ $0.013).
+
+- **Synthetic load: prediction wins.** D violated the SLO in 1 of 50 scored minutes. That
+  is 1.9 ± 1.7 minutes per run fewer than over-provisioning buys for the same money, and
+  1.8 fewer than R60 while using 13 % fewer pod-seconds. The reactive arms lose about a
+  minute per run on the ramps of the daily pattern, even with 40 % headroom; C and D lose
+  none there.
+- **Wikipedia: no gain.** Reactive scaling at full target already keeps up outside the
+  spike, so earlier scaling has nothing to fix. The spike cannot be forecast, and only spare
+  capacity absorbs it (R60, at 49 % more pod-seconds than R100). C and D sit on the
+  reactive curve, not below it.
+- **Start-up delay matters.** D stays at 0–0.3 violation minutes whether new pods start in
+  0, 30 or 60 s. Its advantage over R100 is within noise at 0 s and clear at 30 and 60 s
+  (3 seeds per cell, so the intervals are wide).
+- **Forecasts in the cluster match the backtest** to within about 1 point of sMAPE.
+
+Prediction paid where reactive scaling fell behind the load, not where the load was
+easiest to forecast: the Wikipedia forecasts were six times more accurate, yet gained
+nothing. The hypotheses written down before the runs expected the opposite.
+
+![Start-up delay sweep](docs/img/sweep.png)
 
 ## Calibration results
 
@@ -170,7 +209,7 @@ make arm-smoke ARM=d     # apply an arm and replay the 10-minute smoke trace aga
 
 make experiment-smoke              # every arm once on the smoke trace (~1.5 h)
 make experiment-plan GRID=main     # the runs of a grid and which are done
-make experiment GRID=main          # run what is not done yet (main ~29 h, sweep ~9 h)
+make experiment GRID=main          # run what is not done yet (main ~27 h, sweep ~8 h)
 make experiment GRID=main ONLY=wikipedia LIMIT=6   # a batch
 make summarize GRID=main           # recompute summary.csv from the raw files
 make analyze                       # every table and figure from the saved runs -> docs/
@@ -192,6 +231,6 @@ The analysis scripts use the virtualenv that `make venv` creates.
   for KEDA) and its backtest
 - [x] **Phase 5**: scaling arms (HPA, reactive KEDA at three headroom levels, forecast, hybrid)
 - [x] **Phase 6**: experiment harness (repeated runs, arm order rotated between repetitions)
-- [ ] Experiment runs: main grid (60 runs) and startup-delay sweep (18 runs)
-- [ ] **Phase 7**: analysis: cost vs. SLO-violation frontier, startup-delay sweep
+- [x] Experiment runs: main grid (60 runs) and startup-delay sweep (18 runs)
+- [x] **Phase 7**: analysis: cost vs. SLO-violation frontier, startup-delay sweep
 - [ ] **Phase 8**: fault injection (kill the forecaster mid-run; the fallback should keep the service healthy)
