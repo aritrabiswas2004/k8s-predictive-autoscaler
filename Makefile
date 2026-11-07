@@ -173,8 +173,9 @@ summarize:
 	$(PY) experiments/run_experiment.py summarize $(GRID)
 
 # Every table and figure of the evaluation from the saved runs (no cluster needed):
-# docs/results-tables.md, docs/img/{frontier,sweep,timeline-*,forecast-live}.png and
-# experiments/results/analysis/runs.csv. Works on a partial grid; every number states its n.
+# docs/results-tables.md, docs/img/{frontier,sweep,timeline-*,forecast-live,fault-timeline}.png
+# and experiments/results/analysis/{runs,fault-runs}.csv. Works on a partial grid; every number
+# states its n.
 analyze: venv
 	$(PY) experiments/analysis/analyze.py
 

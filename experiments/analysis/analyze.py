@@ -12,6 +12,10 @@ main grid and the start-up delay sweep), and writes
     <out>/img/forecast-live.png     live forecasts against realized arrivals (arm D)
     experiments/results/analysis/runs.csv   one row per run, every column
 
+and, when --fault holds finished Phase 8 runs (default experiments/results/fault), a fault
+section at the end of results-tables.md, <out>/img/fault-timeline.png (arms C and D of one
+repetition against their no-fault twins) and experiments/results/analysis/fault-runs.csv.
+
 It works on a partial grid: every number states how many runs it rests on. The numbers come
 from evaluation.py; this file only formats and draws.
 """
@@ -229,6 +233,84 @@ def tables(rows, backtest):
     return "\n".join(md) + "\n"
 
 
+def fault_tables(frows, cyc_r100):
+    """Phase 8 section of results-tables.md. frows: evaluation.fault_row per fault run;
+    cyc_r100: {(workload, seed): {"d": (viol, pod-s), "r100": (viol, pod-s)}} in the fault
+    cycle, for the twin D (with its forecast) and the main grid's R100."""
+    kill = frows[0]["kill_s"]
+    down = statistics_median([r["restart_s"] - r["kill_s"] for r in frows])
+    md = ["## Fault: forecaster stopped (Phase 8)", "",
+          f"Arms C and D with the forecaster scaled to 0 at trace second {kill:.0f} (the start "
+          f"of the first scored cycle, just before its ramp) and started again {down:.0f} s "
+          "later. Each fault run is paired with the main-grid run of the same trace and arm "
+          "(its twin, no fault); Δ = fault run minus twin. Fault cycle: the cycle the "
+          "forecaster died in (minutes 15–19); next cycle: minutes 20–24, with the spike.", ""]
+    body = []
+    for w in WORKLOADS + ("both",):
+        for a in ("c", "d"):
+            g = [r for r in frows if r["arm"] == a and w in (r["workload"], "both")]
+            if not g:
+                continue
+            v = ev.mean_ci([r["d_slo_violation_minutes"] for r in g])
+            body.append([TITLES.get(w, "Both workloads"), NAMES[a], len(g), fmt(v, 2),
+                         ev.verdict(v), fmt(col(g, "d_replica_seconds"), 0),
+                         fmt(ev.mean_ci([r["d_replica_seconds"] / r["twin_replica_seconds"]
+                                         for r in g]), 0, pct=True, unit=" %"),
+                         fmt(col(g, "d_fault_cycle_violation_minutes"), 2),
+                         fmt(col(g, "d_fault_cycle_pod_s"), 0),
+                         fmt(col(g, "d_next_cycle_violation_minutes"), 2),
+                         fmt(col(g, "d_next_cycle_pod_s"), 0)])
+    md += [table(["Workload", "Arm", "n", "Δ violation min", "", "Δ pod-s", "Δ pod-s %",
+                  "Δ viol. min, fault cycle", "Δ pod-s, fault cycle",
+                  "Δ viol. min, next cycle", "Δ pod-s, next cycle"], body), ""]
+
+    md += ["What D's forecast is worth in the fault cycle: D minus the main grid's R100 on the "
+           "same trace, with the forecast (the twin) and without it (the fault run).", ""]
+    body = []
+    for w in WORKLOADS:
+        g = [r for r in frows if r["arm"] == "d" and r["workload"] == w
+             and (w, r["seed"]) in cyc_r100]
+        if not g:
+            continue
+        with_ = [cyc_r100[(w, r["seed"])] for r in g]
+        body.append([TITLES[w], len(g),
+                     fmt(ev.mean_ci([c["d"][0] - c["r100"][0] for c in with_]), 2),
+                     fmt(ev.mean_ci([c["d"][1] - c["r100"][1] for c in with_]), 0),
+                     fmt(ev.mean_ci([r["fault_cycle_violation_minutes"] - c["r100"][0]
+                                     for r, c in zip(g, with_)]), 2),
+                     fmt(ev.mean_ci([r["fault_cycle_pod_s"] - c["r100"][1]
+                                     for r, c in zip(g, with_)]), 0)])
+    md += [table(["Workload", "n", "with forecast: Δ viol. min", "Δ pod-s",
+                  "without: Δ viol. min", "Δ pod-s"], body) if body else "–", ""]
+
+    md += ["Per run, in seconds of the trace. The saved series are 15 s samples, so the alert "
+           "and replica times are the first sample at or after the event. Alert: "
+           "ForecastStale (deploy/forecaster/alerts.yaml); its last firing sample relative to "
+           "the first new forecast (it clears within one sample after it).", ""]
+    body = []
+
+    def s(v, digits=0):
+        return "–" if v is None else f"{v:.{digits}f}"
+    for r in frows:
+        body.append([r["run_id"], "yes" if str(r["git_dirty"]) == "True" else "no",
+                     s(r["gone_s"] - r["kill_s"], 1), s(r["back_after_restart_s"], 1),
+                     s(r["alert_firing_after_kill_s"]),
+                     s(r["alert_last_firing_after_back_s"]),
+                     s(r["max_replicas_after_kill_s"]),
+                     f"{r['slo_violation_minutes']} ({r['twin_slo_violation_minutes']})",
+                     f"{r['replica_seconds']:.0f} ({r['twin_replica_seconds']:.0f})"])
+    md += [table(["Run", "Modified tree", "pod gone after kill", "forecast back after restart",
+                  "alert firing after kill", "alert last firing − forecast back",
+                  "C at 7 pods after kill", "violation min (twin)", "pod-s (twin)"], body), ""]
+    dirty = [r["run_id"] for r in frows if str(r["git_dirty"]) == "True"]
+    if dirty:
+        md += [f"Modified tree: {', '.join(dirty)} started while another session had "
+               "uncommitted documentation in the checkout (README.md and docs/ only; no file "
+               "a run reads). The changed files are listed per run in "
+               "experiments/results/fault/dirty-evidence-*.txt.", ""]
+    return md
+
+
 # ---------------------------------------------------------------- figures
 
 def style(plt):
@@ -410,6 +492,99 @@ def timeline_figure(runs, workload, out, plt):
     plt.close(fig)
 
 
+def fault_figure(pairs, out, plt):
+    """Arms C and D of one repetition with the forecaster stopped, against their twins."""
+    height = 3.0 * len(pairs) + 1.3
+    fig = plt.figure(figsize=(10, height), dpi=150)
+    outer = fig.add_gridspec(len(pairs), 1, hspace=0.32, top=1 - 0.95 / height,
+                             bottom=0.62 / height, left=0.07, right=0.98)
+
+    def line(series, start, name, scale=1.0, **labels):
+        """Times and values, with a break (NaN) where samples are missing."""
+        d = ev.series_of(series, name, **labels)
+        xs, ys, prev = [], [], None
+        for t in sorted(d):
+            if prev is not None and t - prev > 2 * ev.metrics.STEP:
+                xs.append(prev - start + ev.metrics.STEP)
+                ys.append(math.nan)
+            xs.append(t - start)
+            ys.append(d[t] * scale)
+            prev = t
+        return xs, ys
+
+    for i, (run, twin, frow) in enumerate(pairs):
+        gs = outer[i].subgridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+        ax = fig.add_subplot(gs[0])
+        lo = fig.add_subplot(gs[1], sharex=ax)
+        a = run["meta"]["arm"]
+        tr, t0, s = run["trace"], run["meta"]["trace_start"], run["series"]
+        tt0, ts = twin["meta"]["trace_start"], twin["series"]
+        hist = tr["history_cycles"] * tr["cycle_seconds"]
+        kill, back = frow["kill_s"], frow["back_s"]
+        for x in (ax, lo):
+            x.axvspan(-60, hist, color=SHADE, lw=0)
+            x.axvspan(kill, back, color=INK, alpha=0.08, lw=0)
+            if tr.get("spike"):
+                x.axvspan(tr["spike"]["start_s"], tr["spike"]["end_s"], color=BAD, alpha=0.08,
+                          lw=0)
+        tt = [k * tr["step_seconds"] for k in range(len(tr["rps"]))]
+        ax.plot(tt, tr["rps"], color=MUTED, lw=0.9, ls=(0, (2, 2)), label="offered (trace)")
+        ax.plot(*line(s, t0, "arrivals"), color=INK, lw=1.0, label="arrivals, rate[1m]")
+        ax.plot(*line(s, t0, "forecast_rps", model="naive", bound="upper"), color=COLOR["r80"],
+                lw=1.0, label="forecast, upper bound (gap: forecaster down)")
+        ax.step(*line(ts, tt0, "replicas_ready", ev.metrics.RPS_PER_POD), where="post",
+                color=MUTED, lw=1.0, ls=(0, (3, 1.5)),
+                label="twin without the fault: ready pods × 40 RPS")
+        ax.step(*line(s, t0, "replicas_ready", ev.metrics.RPS_PER_POD), where="post",
+                color=COLOR[a], lw=1.8, label="with the fault: ready pods × 40 RPS")
+        firing = sorted(t - t0 for t in ev.series_of(s, "forecast_stale_alert",
+                                                     alertstate="firing"))
+        if firing:
+            ax.hlines([292] * len(firing), firing, [t + ev.metrics.STEP for t in firing],
+                      color=BAD, lw=3)
+            ax.annotate("ForecastStale firing", (firing[-1] + ev.metrics.STEP, 292),
+                        xytext=(4, 0), textcoords="offset points", va="center", fontsize=7,
+                        color=INK)
+        ax.set_ylim(0, 305)
+        ax.set_ylabel("RPS")
+        ax.grid(axis="y", color=GRID, lw=0.6)
+        ax.set_title(f"{LONG[a]}.  With the fault: {frow['slo_violation_minutes']} "
+                     f"SLO-violation minutes, {frow['replica_seconds']:.0f} pod-s.  Twin: "
+                     f"{frow['twin_slo_violation_minutes']} minutes, "
+                     f"{frow['twin_replica_seconds']:.0f} pod-s", fontsize=8.5)
+        plt.setp(ax.get_xticklabels(), visible=False)
+        # Each minute's client p95: the fault run as bars (red = violates), the twin as ticks.
+        ms = run["k6"]["minutes"]
+        lo.bar([m["minute"] * 60 for m in ms], [max(m["p95_ms"] or 1, 1) for m in ms],
+               width=52, align="edge", lw=0,
+               color=[BAD if ev.metrics.minute_slo(m)[0] else MUTED for m in ms])
+        ms = twin["k6"]["minutes"]
+        lo.scatter([m["minute"] * 60 + 26 for m in ms], [max(m["p95_ms"] or 1, 1) for m in ms],
+                   marker="_", s=70, color=INK, lw=1.4, zorder=3)
+        lo.axhline(ev.metrics.SLO_MS, color=BAD, lw=0.8, ls=(0, (4, 2)))
+        lo.set_yscale("log")
+        lo.set_ylim(3, 20000)
+        lo.set_yticks([10, 300, 10000])
+        lo.set_yticklabels(["10", "300", "10k"])
+        lo.set_ylabel("p95 ms", fontsize=7)
+        lo.set_xlim(hist - 300, tr["duration_seconds"] + 120)
+        if i < len(pairs) - 1:
+            plt.setp(lo.get_xticklabels(), visible=False)
+    lo.set_xlabel("seconds since trace start.  Grey: last history cycle (not scored); dark "
+                  "band: forecaster down; red band: spike.\nBars: each minute's client p95 "
+                  "with the fault (red = violates the SLO); black ticks: the twin's p95.")
+    m, f0 = pairs[0][0]["meta"], pairs[0][2]
+    fig.text(0.01, 1 - 0.12 / height, f"{TITLES[m['workload']]}, repetition {m['seed']}: "
+             f"forecaster stopped at {f0['kill_s']:.0f} s, started again "
+             f"{f0['restart_s'] - f0['kill_s']:.0f} s later", ha="left", va="top",
+             fontsize=9.5)
+    h, lab = fig.axes[0].get_legend_handles_labels()
+    fig.legend(h, lab, loc="upper left", ncol=3, bbox_to_anchor=(0.06, 1 - 0.36 / height),
+               fontsize=7.5)
+    fig.savefig(out)
+    plt.close(fig)
+
+
 def forecast_figure(runs, out, plt):
     """Arm D of one repetition per workload: arrivals and both models' forecasts."""
     fig, axes = plt.subplots(len(runs), 1, figsize=(10, 2.9 * len(runs)), dpi=150,
@@ -463,6 +638,12 @@ def main():
     ap.add_argument("--out", default=str(REPO / "docs"))
     ap.add_argument("--csv", default=str(REPO / "experiments/results/analysis/runs.csv"))
     ap.add_argument("--seed", type=int, default=1, help="repetition shown in the timelines")
+    ap.add_argument("--fault", default=str(REPO / "experiments/results/fault"),
+                    help="Phase 8 fault runs (paired with their twins under --runs)")
+    ap.add_argument("--fault-csv",
+                    default=str(REPO / "experiments/results/analysis/fault-runs.csv"))
+    ap.add_argument("--fault-seed", type=int, default=3,
+                    help="repetition (synthetic) shown in the fault timeline")
     a = ap.parse_args()
 
     import matplotlib
@@ -487,8 +668,38 @@ def main():
     ev.write_csv(rows, Path(a.csv))
     bt_path = REPO / "experiments/results/backtest/backtest.json"
     backtest = json.loads(bt_path.read_text())["summary"] if bt_path.exists() else {}
-    (out / "results-tables.md").write_text(tables(rows, backtest))
+    md = tables(rows, backtest)
     written = [a.csv, out / "results-tables.md"]
+
+    by_id = {r["meta"]["run_id"]: r for r in runs}
+    fault = []
+    for d in sorted(Path(a.fault).glob("*/")) if Path(a.fault).is_dir() else []:
+        run = ev.load_run(d)
+        twin = by_id.get(ev.twin_id(run["meta"]["run_id"])) if run else None
+        if run and twin:
+            run["row"] = ev.run_row(run)
+            fault.append((run, twin, ev.fault_row(run, twin, run["row"], twin["row"])))
+    if fault:
+        print(f"{len(fault)} finished fault runs with a twin", file=sys.stderr)
+        cyc = {}
+        for run, twin, fr in fault:
+            m = run["meta"]
+            r100 = by_id.get(f"{m['trace']}-d{m['startup_delay_seconds']}-r100")
+            if m["arm"] == "d" and r100:
+                c = int(fr["kill_s"] // run["trace"]["cycle_seconds"])
+                cyc[(m["workload"], m["seed"])] = {"d": ev.cycle_numbers(twin, c),
+                                                   "r100": ev.cycle_numbers(r100, c)}
+        frows = [fr for _, _, fr in fault]
+        md += "\n".join(fault_tables(frows, cyc)) + "\n"
+        ev.write_csv(frows, Path(a.fault_csv))
+        written.append(a.fault_csv)
+        pick = [p for p in fault if p[0]["meta"]["workload"] == "synthetic"
+                and p[0]["meta"]["seed"] == a.fault_seed]
+        pick.sort(key=lambda p: p[0]["meta"]["arm"])
+        if pick:
+            fault_figure(pick, img / "fault-timeline.png", plt)
+            written.append(img / "fault-timeline.png")
+    (out / "results-tables.md").write_text(md)
 
     if any(r["grid"] == "main" for r in rows):
         frontier_figure(rows, img / "frontier.png", plt)

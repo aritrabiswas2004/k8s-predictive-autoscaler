@@ -292,3 +292,59 @@ def paired(rows, workload, arm, other, key, delay=30):
     a, b = by_seed(rows, workload, arm, delay), by_seed(rows, workload, other, delay)
     return mean_ci([a[s][key] - b[s][key] for s in sorted(a) if s in b
                     and a[s][key] is not None and b[s][key] is not None])
+
+
+# ---------------------------------------------------------------- Phase 8: forecaster killed
+
+FALLBACK_REPLICAS = 7  # arm C's KEDA fallback.replicas (deploy/arms/c-forecast.yaml) = max
+
+
+def twin_id(run_id):
+    """The main-grid run of the same trace, arm and delay as a fault run."""
+    return run_id.removesuffix("-kill")
+
+
+def cycle_numbers(run, cycle):
+    """(SLO-violation minutes, pod-seconds) of one 0-based cycle of the trace, counted like the
+    scored window's: minutes by their start, pods from the 15 s 'replicas' samples."""
+    tr = run["trace"]
+    lo = cycle * tr["cycle_seconds"]
+    hi = lo + tr["cycle_seconds"]
+    viol = sum(1 for m in run["k6"]["minutes"]
+               if lo <= m["minute"] * 60 < hi and metrics.minute_slo(m)[0])
+    pods = metrics.values(run["series"], "replicas", run["meta"]["trace_start"], lo, hi)
+    return viol, sum(v for _, v in pods) * metrics.STEP
+
+
+def fault_row(run, twin, row, twin_row):
+    """One row per fault run: when the fault happened (trace seconds, from run.json), what the
+    alert and the scaler did (from the saved series), and the differences to the twin overall
+    and in the fault's cycle and the next one. Saved series are 15 s samples, so the alert and
+    replica times are rounded up to the next sample."""
+    meta, s, t0 = run["meta"], run["series"], run["meta"]["trace_start"]
+    e = meta["fault_events"]
+    out = {k: meta[k] for k in ("run_id", "arm", "workload", "seed", "git_sha", "git_dirty")}
+    out.update({f"{k}_s": e.get(k) for k in ("kill", "gone", "restart", "back")})
+    kill, back = e["kill"], e["back"]
+    out["down_s"] = round(back - kill, 1)
+    out["back_after_restart_s"] = round(back - e["restart"], 1)
+    firing = sorted(t - t0 for t in series_of(s, "forecast_stale_alert", alertstate="firing"))
+    firing = [t for t in firing if kill <= t <= back + 300]
+    out["alert_firing_after_kill_s"] = firing[0] - kill if firing else None
+    # The alert's last firing sample, relative to the first new forecast: it clears within
+    # one sample after that.
+    out["alert_last_firing_after_back_s"] = firing[-1] - back if firing else None
+    spec = metrics.values(s, "replicas_spec", t0, kill, back + 300)
+    at_max = [t for t, v in spec if v >= FALLBACK_REPLICAS]
+    out["max_replicas_after_kill_s"] = at_max[0] - kill if at_max else None
+    tw = twin["meta"]
+    out["twin_run_id"], out["twin_git_sha"] = tw["run_id"], tw["git_sha"]
+    for k in ("slo_violation_minutes", "replica_seconds", "underprovisioned_seconds"):
+        out[k], out[f"twin_{k}"] = row[k], twin_row[k]
+        out[f"d_{k}"] = row[k] - twin_row[k]
+    fault_cycle = int(kill // run["trace"]["cycle_seconds"])
+    for name, c in (("fault_cycle", fault_cycle), ("next_cycle", fault_cycle + 1)):
+        (v, p), (tv, tp) = cycle_numbers(run, c), cycle_numbers(twin, c)
+        out[f"{name}_violation_minutes"], out[f"{name}_pod_s"] = v, p
+        out[f"d_{name}_violation_minutes"], out[f"d_{name}_pod_s"] = v - tv, p - tp
+    return out

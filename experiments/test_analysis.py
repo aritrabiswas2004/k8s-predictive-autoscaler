@@ -129,6 +129,70 @@ class ForecastTest(unittest.TestCase):
 
 
 @unittest.skipUnless((SMOKE / "smoke-d30-d" / "run.json").exists(), "smoke results missing")
+class FaultTest(unittest.TestCase):
+    """Phase 8 rows from a hand-made fault run and twin (2 cycles of 300 s, 1 of history)."""
+
+    T0 = 1000.0
+
+    def make_run(self, run_id, pods, viol_minutes, alert=(), spec=None, events=None):
+        tr = {"cycle_seconds": 300, "history_cycles": 1, "duration_seconds": 900,
+              "step_seconds": 5, "rps": [40.0] * 181}
+        ts = range(0, 900, 15)
+        series = {"replicas": [{"metric": {}, "values": [[self.T0 + t, pods(t)] for t in ts]}],
+                  "replicas_spec": [{"metric": {}, "values": [[self.T0 + t, (spec or pods)(t)]
+                                                              for t in ts]}],
+                  "forecast_stale_alert": [
+                      {"metric": {"alertstate": "pending"}, "values": [[self.T0 + 285, 1]]},
+                      {"metric": {"alertstate": "firing"},
+                       "values": [[self.T0 + t, 1] for t in alert]}]}
+        minutes = [{"minute": m, "offered": 2400, "requests": 2400, "failed_rate": 0,
+                    "p95_ms": 900 if m in viol_minutes else 20} for m in range(15)]
+        meta = {"run_id": run_id, "arm": "c", "workload": "synthetic", "seed": 1,
+                "git_sha": "abc", "git_dirty": False, "trace_start": self.T0,
+                "fault_events": events}
+        return {"meta": meta, "trace": tr, "series": series, "k6": {"minutes": minutes}}
+
+    def test_cycle_numbers(self):
+        r = self.make_run("x", lambda t: 2.0 if t < 300 else 4.0, {1, 6, 7})
+        self.assertEqual(ev.cycle_numbers(r, 0), (1, 20 * 2.0 * 15))
+        self.assertEqual(ev.cycle_numbers(r, 1), (2, 20 * 4.0 * 15))
+
+    def test_fault_row(self):
+        events = {"kill": 300.0, "gone": 302.1, "restart": 480.0, "ready": 480.5,
+                  "back": 490.0}
+        fault = self.make_run("synthetic-s1-d30-c-kill",
+                         lambda t: 7.0 if 375 <= t < 600 else 3.0, {12},
+                         alert=range(345, 495, 15), events=events)
+        twin = self.make_run("synthetic-s1-d30-c", lambda t: 3.0, {6, 12})
+        frow = ev.fault_row(fault, twin, {"slo_violation_minutes": 1, "replica_seconds": 9.0,
+                                          "underprovisioned_seconds": 0},
+                            {"slo_violation_minutes": 2, "replica_seconds": 5.0,
+                             "underprovisioned_seconds": 15})
+        self.assertEqual(ev.twin_id(frow["run_id"]), frow["twin_run_id"])
+        self.assertEqual(frow["down_s"], 190.0)
+        self.assertEqual(frow["back_after_restart_s"], 10.0)
+        self.assertEqual(frow["alert_firing_after_kill_s"], 45.0)  # pending is not firing
+        self.assertEqual(frow["alert_last_firing_after_back_s"], 480 - 490)
+        self.assertEqual(frow["max_replicas_after_kill_s"], 75.0)  # 375 s, first at 7 pods
+        self.assertEqual((frow["d_slo_violation_minutes"], frow["d_replica_seconds"]),
+                         (-1, 4.0))
+        # Fault cycle 1 (300-600 s): 7 pods from 375 s = 15 samples at +4 pods; violations:
+        # minute 6 only in the twin. Next cycle 2 (600-900 s): same pods, minute 12 in both.
+        self.assertEqual(frow["d_fault_cycle_pod_s"], 15 * 4.0 * 15)
+        self.assertEqual(frow["d_fault_cycle_violation_minutes"], -1)
+        self.assertEqual((frow["d_next_cycle_violation_minutes"], frow["d_next_cycle_pod_s"]),
+                         (0, 0))
+
+    def test_no_alert_no_fallback(self):
+        events = {"kill": 300.0, "gone": 302.0, "restart": 480.0, "back": 485.0}
+        fault = self.make_run("x-kill", lambda t: 3.0, set(), events=events)
+        frow = ev.fault_row(fault, self.make_run("x", lambda t: 3.0, set()),
+                            *[{"slo_violation_minutes": 0, "replica_seconds": 1.0,
+                               "underprovisioned_seconds": 0}] * 2)
+        self.assertIsNone(frow["alert_firing_after_kill_s"])
+        self.assertIsNone(frow["max_replicas_after_kill_s"])
+
+
 class SmokeRunTest(unittest.TestCase):
     """The committed smoke grid: Phase 7's row agrees with the harness's summary.csv."""
 
