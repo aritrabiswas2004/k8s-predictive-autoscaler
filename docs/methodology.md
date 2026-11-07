@@ -1,8 +1,102 @@
 # Methodology
 
-How the experiment's constants were measured. Every number here comes from a run whose raw
-output is in `experiments/results/`; the commands to reproduce it are at the end of each
-section.
+How the experiment is designed, what keeps it fair, and how its constants were measured.
+Every number here comes from a run whose raw output is in `experiments/results/`; the
+commands to reproduce it are at the end of each section. The results are in
+[results.md](results.md), and what could still be wrong with them is under
+[threats to validity](#threats-to-validity).
+
+## Design
+
+**Question.** Does scaling on a forecast of the coming load beat scaling on the current load
+*at equal cost*, and under which conditions?
+
+**Testbed.** One laptop runs a three-node [kind](https://kind.sigs.k8s.io/) cluster. A Go
+demo service (`web`) counts each request on arrival and burns a fixed amount of CPU per
+request. Prometheus scrapes the arrival counter every 15 s. The forecaster reads that history
+and writes back a forecast of the coming peak, and KEDA turns the forecast, the current
+arrival rate or both into a replica count for the HPA ([diagram](../README.md#how-it-works)).
+k6 replays the load. The app pods have a node with pinned CPUs to themselves; everything else
+shares the other node and the control plane.
+
+**Arms.** Six autoscaler setups, which differ only in the signal and the target per pod
+([table](#scaling-arms)):
+- A: the default HPA on CPU;
+- R100, R80, R60: KEDA on the arrival rate, with targets of 100, 80 and 60 % of 40 RPS
+  per pod;
+- C: the forecast alone;
+- D: the forecast and the arrival rate together.
+
+**Workloads.** Five compressed "days" of 300 s each. The first three are history (warm-up for
+the forecaster, not scored) and the last two are scored. Each has an 80 s spike in the last
+day, at a second that depends on the seed and that no forecast can see
+([load traces](#load-traces)). There are two workloads:
+- **synthetic**: a daily shape whose height and timing vary from day to day;
+- **German Wikipedia**: a real week, scaled to the testbed.
+
+**Measures.** Per run, over the two scored days:
+- *SLO-violation minutes*: minutes whose client-side p95 is over 300 ms, or in which more
+  than 5 % of the offered requests failed or were never sent;
+- *pod-seconds*: the cost.
+
+[Details](#what-a-run-is-scored-on).
+
+**Comparison.** The reactive arms R100, R80 and R60 trace a cost-versus-violations frontier:
+what buying headroom achieves. An arm is better than over-provisioning only if it lies below
+that frontier, with a 95 % interval that clears it ([the frontier test](#analysis)). Lower
+violations at a higher cost, alone, show nothing.
+
+**Grids** ([harness](#experiment-harness)):
+- **main:** all six arms × both workloads × seeds 1–5, start-up delay 30 s. 60 runs.
+- **sweep:** R100, R80 and D × synthetic × seeds 1–3 × start-up delay 0 and 60 s. 18 runs.
+- **fault:** C and D × both workloads × seeds 1–3, with the forecaster killed for 3 minutes
+  mid-run. 12 runs.
+
+### Fairness controls
+
+- **Same load.** Within a repetition every arm replays the identical trace: same seed, same
+  cycle variation, same spike at the same second.
+- **Same everything else, checked mechanically.**
+  - Every arm has the same resources, replica bounds (2–7) and HPA behaviour block.
+  - `make arm-check` compares the applied manifests, and CI compares them as text.
+- **One arm at a time, with a clean reset.** Before each run:
+  - the previous scaler is removed;
+  - the service goes back to exactly 2 Ready pods;
+  - the arrival rate must fall below 1 RPS, so no run inherits the previous run's 1-minute
+    rate.
+- **Order effects removed.**
+  - The arm order rotates by one position per repetition, so no arm goes first twice on a
+    workload, and the workload order alternates.
+  - Every run starts after a deterministic 0–15 s jitter, so runs don't all hit the same
+    phase of the HPA's 15 s sync.
+- **Same signals.**
+  - Every target has the same scrape interval and the same `rate[1m]` window.
+  - Scalers and forecaster read arrivals, never CPU, replicas or completions. Those signals
+    flatten under overload or feed back on the scaler's own decisions.
+- **Open-model load.** k6 sends on schedule whether or not the service keeps up. A request
+  that is never sent counts against the arm, not for it.
+- **Paired statistics.** Arms are compared within a repetition, where the trace is identical.
+- **Recorded, not assumed.** Each run records:
+  - the Git commit, and whether the working tree differed from it;
+  - the chart and Kubernetes versions;
+  - the CPU of every node container.
+
+### Assumptions
+
+- **One resource.** The service is CPU-bound and stateless, with a fixed cost per request.
+  One pod carries a known rate (40 RPS, 75 % of the measured knee), so the pods a load needs
+  follow from its rate.
+- **One repeating pattern.** The load has a single seasonal period, the "day", compressed to
+  300 s. The forecaster learns it from three days of history.
+- **No node waits.** Scale-up lag is detection, the HPA sync, scheduling and the pod's
+  start-up delay (30 s by default, swept 0–60 s). Nodes already exist, so no pod waits for
+  one.
+- **Users see the client side.** The SLO is measured at the load generator, per minute, with
+  failed and unsent requests counted as bad.
+- **Cost is pod-seconds.** Every pod costs the same per second, as on AWS Fargate. There is no
+  bin packing onto nodes.
+- **The monitoring stays up.** Prometheus is assumed available. Only the forecaster is killed
+  in the fault runs.
 
 ## Constants
 
@@ -645,8 +739,9 @@ standard library and kubectl.
 
 | Grid | Runs | Arms | Traces | Startup delay | Wall time |
 |---|---:|---|---|---|---|
-| `main` | 60 | A, R100, R80, R60, C, D | synthetic and wikipedia, seeds 1–5 | 30 s | ~29 h |
-| `sweep` | 18 | R100, R80, D | synthetic, seeds 1–3 | 0 s and 60 s (30 s comes from `main`) | ~9 h |
+| `main` | 60 | A, R100, R80, R60, C, D | synthetic and wikipedia, seeds 1–5 | 30 s | ~27 h |
+| `sweep` | 18 | R100, R80, D | synthetic, seeds 1–3 | 0 s and 60 s (30 s comes from `main`) | ~8 h |
+| `fault` | 12 | C, D | synthetic and wikipedia, seeds 1–3, forecaster killed | 30 s | ~5.5 h |
 | `smoke` | 6 | all | `smoke` (2 cycles, no spike) | 30 s | ~1.5 h |
 
 **Repetitions.** Repetition r replays trace seed r, so within a repetition every arm gets the
@@ -675,6 +770,20 @@ same phase of the HPA's 15 s sync ([why](#scale-up-lag)).
 The history cycles also serve as warm-up. Every arm starts at 2 pods, and by the first scored
 minute the forecaster's 3-cycle window holds only this run's own traffic.
 
+**Fault runs** (grid `fault`, run ids ending in `-kill`, saved under `results/fault/`). A
+thread reads the trace start from the k6 pod's log. At the start of the first scored cycle
+(trace second 900) it scales the forecaster to 0, and 180 s later back to 1. It records five
+times in `run.json` (`fault_events`, in trace seconds):
+- the kill being sent;
+- the pod being gone;
+- the restart being sent;
+- the restarted pod being ready;
+- Prometheus holding the first new forecast.
+
+If any step doesn't happen, the run fails. The forecaster is always started again, even after
+a failed or interrupted run. Each fault run is compared with its *twin*: the main-grid run of
+the same trace and arm, without the fault ([results](results.md#fault-the-forecaster-dies-under-load)).
+
 **Resumable and unattended.** `make experiment GRID=main` runs every run whose `run.json` does
 not say `ok`, so re-running it continues the grid; `ONLY=` (a regex on the run id) and
 `LIMIT=` cut it into batches. A failed run is recorded with its error and redone next time.
@@ -689,7 +798,7 @@ macOS from sleeping. Ctrl-C marks the current run failed and removes its scaler.
 | `run.json` | metadata (arm, trace, seed, delay, lead, repetition, position, jitter, git SHA and whether the tree was dirty, Helm chart versions, Kubernetes version, timestamps, trace start) and the summary row |
 | `k6.json`, `k6.log` | k6 summary (overall, per cycle, history/scored, spike and **per minute**) and its log |
 | `k6.docker-stats.csv` | CPU of the three kind node containers every few seconds |
-| `series.json` | 15 s Prometheus series: arrivals, served rate, pods (existing, Ready, desired by the Deployment and by the HPA), CPU used and CFS throttling, queued requests, server-side p95, and both models' forecasts with their timestamps and lead/window |
+| `series.json` | 15 s Prometheus series: arrivals, served rate, pods (existing, Ready, desired by the Deployment and by the HPA), CPU used and CFS throttling, queued requests, server-side p95, and both models' forecasts with their timestamps and lead/window; from the fault runs on, also whether the forecaster is scraped and the state of the `ForecastStale` alert |
 
 The series are on the epoch-aligned 15 s grid the forecaster itself uses, so Phase 7 can
 score each forecast on exactly the samples it was made for
@@ -750,7 +859,11 @@ repetitions, 3 history cycles and rotated order.
 `experiments/analysis/evaluation.py`) turns the saved runs into every table and figure of the
 evaluation: `docs/results-tables.md` (generated, not edited by hand), `docs/img/frontier.png`,
 `sweep.png`, `timeline-synthetic.png`, `timeline-wikipedia.png`, `forecast-live.png`, and one
-row per run in `experiments/results/analysis/runs.csv`. It needs no cluster, works on a
+row per run in `experiments/results/analysis/runs.csv`. With fault runs present it adds a
+fault section to the tables, `docs/img/fault-timeline.png` and
+`experiments/results/analysis/fault-runs.csv`: each fault run against its twin, overall, in
+the cycle of the outage and in the next one, plus the alert's and the fallback's timings. It
+needs no cluster, works on a
 partial grid, and states how many runs every number rests on. Each row is recomputed with the
 harness's own summary code (`experiments/metrics.py`), and a test checks that it reproduces
 the smoke grid's `summary.csv`.
@@ -805,3 +918,80 @@ each minute's client p95 with violating minutes in red.
 aqua and A grey. Each has its own marker shape, and every point is labelled directly. Blue,
 orange and aqua pass the all-pairs colour-vision-deficiency check of the palette validator
 used.
+
+## Threats to validity
+
+What could make the results wrong or not transfer, and what was done about each.
+
+- **Compressed time.** A day becomes 300 s, but the scale-up lag is real time.
+  - Ramps are therefore relatively steep, which favours prediction.
+  - The start-up delay sweep and the ramp-steepness limit on the traces
+    ([load traces](#load-traces)) make the relation explicit rather than hide it.
+  - Real daily traffic has hours-long ramps, and the absolute numbers here don't transfer.
+- **One machine, heterogeneous cores, laptop thermals.**
+  - CPU pinning isolates scheduling. It doesn't isolate the memory system, the thermal state,
+    or which of the host's performance and efficiency cores run the app.
+  - A saturated tools node slowed the app by about 40 % in Phase 1.
+  - Per-pod capacity was higher with seven busy pods than with one, which cushions
+    under-provisioning when the node is busy.
+  - Countermeasures: node CPU is recorded in every run, the tools node stayed far from
+    saturation (median 7 % of one core in the evaluation runs), and the arm order is rotated.
+- **CFS throttling and bursty arrivals.**
+  - With one connection per request, a pod sometimes gets several requests at once and
+    exhausts its CPU quota for a 100 ms period.
+  - This fattens the latency tail before the knee. It affects every arm alike, but makes p99
+    noisier than p95.
+- **A synthetic workload designed by the author.** Its variation parameters are judgement
+  calls. The Wikipedia trace is there to check that the conclusions don't hinge on them, and
+  results are reported per workload.
+- **One real week, transformed.**
+  - Mapping German Wikipedia to 30–150 RPS compresses its range from about 10× to 5×.
+  - One week has no weekends, holidays or incidents.
+- **Partly simulated backtest.** The backtest's arrival series model Prometheus' view: they
+  match the recorded series to 3.3 % on average, but they aren't recordings. Their windows
+  overlap and aren't independent.
+- **Forecaster history at run start.**
+  - During the unscored history cycles, the forecaster's window still holds the previous
+    run's tail, so arm C's scaling there responds to load from another run.
+  - The scored cycles are unaffected.
+- **Dropped requests under overload.**
+  - An open-model generator must start virtual users mid-run when responses slow down, and it
+    drops requests it can't start on time.
+  - Those requests are reported, and count as bad in the SLO rule, so dropping them can't make
+    a minute look better.
+- **Repetitions vary the trace as well as the run.**
+  - Repetition r replays seed r, so intervals over repetitions include trace variation.
+  - Comparisons between arms are paired within a repetition.
+- **Long unattended runs on a laptop.**
+  - The 90 runs took about 41 h of running time over five days, on five freshly built
+    clusters with the same pinned versions:
+    - the main grid's repetition 1 on the first;
+    - repetitions 2–5 on the second;
+    - the sweep on the third and fourth;
+    - the fault runs on the fifth.
+  - Arms are compared within one cluster, except the sweep's 60 s R100 run on seed 2, and the
+    fault runs against their twins.
+  - Six runs ran partly on battery, and none differs from its arm's other repetitions.
+  - One run was corrupted by the laptop sleeping and was still recorded as successful. It was
+    caught, set aside and repeated.
+  - Every run has since been checked for gaps in time (finish − trace start = 1620–1621 s) and
+    in its series.
+- **Cost varies with the trace.**
+  - Pod-seconds fall from repetition 1 to 5 in almost every arm, in step with the spike's
+    start, which moves from 1260 to 1385 s with the seed: a later spike leaves less post-spike
+    capacity inside the scored window.
+  - Repetition 1 is also the only one on the first cluster, so the two causes can't be
+    separated for it.
+  - Paired and frontier comparisons are unaffected.
+- **Few repetitions, coarse counts.**
+  - Five repetitions (three in the sweep and the fault grid) give wide intervals.
+  - A violation count is an integer from 0 to 10. When all repetitions agree, the interval has
+    zero width: that reflects identical outcomes, not certainty.
+- **One service, one resource, no node autoscaling.** New pods never wait for a node, which
+  on a cloud cluster would lengthen the lag (and favour prediction).
+- **The fault runs test one fault shape.**
+  - The forecaster was killed once per run, before a ramp, for 3 minutes.
+  - Not tested: kills during a ramp or a spike, longer outages, a Prometheus outage, and a
+    permanent pattern shift.
+  - Two fault runs started from a working tree with uncommitted documentation, which nothing a
+    run reads ([details](results.md#caveats)).
