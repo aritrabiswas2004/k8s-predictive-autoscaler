@@ -290,12 +290,30 @@ def frontier_figure(rows, out, plt):
     plt.close(fig)
 
 
+def label_ends(ax, ends, gap=10):
+    """Direct labels at the right end of each line; labels whose points are closer than
+    `gap` points vertically are spread apart so they do not print on top of each other."""
+    to_pts = ax.transData.transform
+    x = max((e[0] for e in ends), default=0)  # one column: the lines' ends are offset in x
+    placed = []  # (y in display points, text offset in points)
+    for _, y, name in sorted(ends, key=lambda e: e[1]):
+        py = to_pts((x, y))[1]
+        dy = 0.0
+        for qy, qdy in placed:
+            if abs((py + dy) - (qy + qdy)) < gap:
+                dy = qy + qdy + gap - py
+        placed.append((py, dy))
+        ax.annotate(name, (x, y), xytext=(6, dy), textcoords="offset points", va="center",
+                    fontsize=8)
+
+
 def sweep_figure(rows, out, plt):
     sw = [r for r in rows if r["workload"] == "synthetic" and r["seed"] in SWEEP_SEEDS
           and r["grid"] in ("main", "sweep")]
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.6), dpi=150)
     for ax, (key, label) in zip(axes, (("slo_violation_minutes", "SLO-violation minutes"),
                                        ("replica_seconds", "pod-seconds (cost)"))):
+        ends = []  # (x, y, name) of each line's last point, labelled after all lines are drawn
         for k, a in enumerate(SWEEP_ARMS):
             xs, ms, hs = [], [], []
             for d in DELAYS:
@@ -307,12 +325,12 @@ def sweep_figure(rows, out, plt):
             if xs:
                 ax.errorbar(xs, ms, yerr=hs, color=COLOR[a], marker=MARKER[a], ms=6,
                             mec="white", mew=1.1, lw=1.6, capsize=0, label=LONG[a])
-                ax.annotate(NAMES[a], (xs[-1], ms[-1]), xytext=(6, 0),
-                            textcoords="offset points", va="center", fontsize=8)
+                ends.append((xs[-1], ms[-1], NAMES[a]))
+        ax.set_ylim(bottom=0)  # before labelling: label_ends measures in the final scale
+        label_ends(ax, ends)
         ax.set_xticks(DELAYS)
         ax.set_xlabel("start-up delay of a new pod (s)")
         ax.set_ylabel(label)
-        ax.set_ylim(bottom=0)
         ax.grid(color=GRID, lw=0.6)
     axes[0].set_title("Synthetic, seeds 1–3: mean with 95 % intervals")
     axes[0].legend(loc="upper left")
