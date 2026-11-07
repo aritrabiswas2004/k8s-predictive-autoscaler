@@ -150,7 +150,7 @@ KEDA on the current request rate with 0, 20 and 40 % spare capacity (**R100**, *
 | C: forecast only | 0.6 | +20 % | 2.0 | −2 % |
 | **D: forecast + request rate** | **0.2** | +31 % | 2.0 | +9 % |
 
-- **Varying daily traffic:** D cut slow minutes from 2.8 to 0.2, with 13 % fewer
+- **Varying daily traffic:** D cut slow minutes from 2.8 to 0.2, with 14 % fewer
   pod-seconds than adding 40 % spare capacity, which still left 2.0 slow minutes.
 - **Smooth daily traffic:** reactive scaling already keeps up, so D performs the same as
   R100 at 9 % more cost. The remaining slow minutes are a sudden spike that no forecast can
@@ -158,6 +158,12 @@ KEDA on the current request rate with 0, 20 and 40 % spare capacity (**R100**, *
 - **The slower your pods start, the more it helps.** With a 30 s or 60 s start-up, D's
   advantage was clear. With pods that start instantly, it was too small to tell apart from
   noise. On a cloud cluster, waiting for a new node adds to the start-up.
+
+- **When the forecaster dies,** D falls back to the request rate. In tests where the
+  forecaster was stopped for 3 minutes under load, D cost no more than with its forecast,
+  and had 0–2 more slow minutes on varying traffic, about as many as R100 in that cycle. The
+  forecast-only setup (C) went to its fallback of maximum pods: no extra slow minutes, but
+  40 % more pod-seconds. [Fault test write-up](docs/results.md).
 
 All results, with confidence intervals: [docs/results-tables.md](docs/results-tables.md).
 How the benchmarks work: [docs/methodology.md](docs/methodology.md).
