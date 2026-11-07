@@ -138,3 +138,42 @@ CPU of the kind node containers during each run (100 % = one CPU). The app node 
 | Synthetic | 48 | 47 ± 1 | 7 ± 0 | 213 |
 | German Wikipedia | 30 | 74 ± 0 | 7 ± 0 | 258 |
 
+## Fault: forecaster stopped (Phase 8)
+
+Arms C and D with the forecaster scaled to 0 at trace second 900 (the start of the first scored cycle, just before its ramp) and started again 180 s later. Each fault run is paired with the main-grid run of the same trace and arm (its twin, no fault); Δ = fault run minus twin. Fault cycle: the cycle the forecaster died in (minutes 15–19); next cycle: minutes 20–24, with the spike.
+
+| Workload | Arm | n | Δ violation min |  | Δ pod-s | Δ pod-s % | Δ viol. min, fault cycle | Δ pod-s, fault cycle | Δ viol. min, next cycle | Δ pod-s, next cycle |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Synthetic | C | 3 | 0.00 ± 2.48 | within noise | 775 ± 168 | 32 ± 10 % | 0.00 ± 0.00 | 720 ± 162 | 0.00 ± 2.48 | 55 ± 78 |
+| Synthetic | D | 3 | 1.00 ± 2.48 | within noise | -275 ± 43 | -11 ± 1 % | 0.67 ± 2.87 | -200 ± 176 | 0.33 ± 1.43 | -75 ± 134 |
+| German Wikipedia | C | 3 | 0.00 ± 0.00 | within noise | 970 ± 57 | 48 ± 11 % | 0.00 ± 0.00 | 930 ± 99 | 0.00 ± 0.00 | 40 ± 57 |
+| German Wikipedia | D | 3 | 0.33 ± 1.43 | within noise | -5 ± 120 | -0 ± 5 % | 0.00 ± 0.00 | 10 ± 86 | 0.33 ± 1.43 | -15 ± 37 |
+| Both workloads | C | 6 | 0.00 ± 0.66 | within noise | 872 ± 122 | 40 ± 10 % | 0.00 ± 0.00 | 825 ± 131 | 0.00 ± 0.66 | 48 ± 27 |
+| Both workloads | D | 6 | 0.67 ± 0.86 | within noise | -140 ± 159 | -5 ± 6 % | 0.33 ± 0.86 | -95 ± 132 | 0.33 ± 0.54 | -45 ± 51 |
+
+What D's forecast is worth in the fault cycle: D minus the main grid's R100 on the same trace, with the forecast (the twin) and without it (the fault run).
+
+| Workload | n | with forecast: Δ viol. min | Δ pod-s | without: Δ viol. min | Δ pod-s |
+|---|---:|---:|---:|---:|---:|
+| Synthetic | 3 | -1.00 ± 2.48 | 400 ± 131 | -0.33 ± 1.43 | 200 ± 57 |
+| German Wikipedia | 3 | 0.00 ± 0.00 | 165 ± 0 | 0.00 ± 0.00 | 175 ± 86 |
+
+Per run, in seconds of the trace. The saved series are 15 s samples, so the alert and replica times are the first sample at or after the event. Alert: ForecastStale (deploy/forecaster/alerts.yaml); its last firing sample relative to the first new forecast (it clears within one sample after it).
+
+| Run | Modified tree | pod gone after kill | forecast back after restart | alert firing after kill | alert last firing − forecast back | C at 7 pods after kill | violation min (twin) | pod-s (twin) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| synthetic-s1-d30-c-kill | no | 2.1 | 16.8 | 46 | -1 | 76 | 0 (1) | 3240 (2535) |
+| synthetic-s1-d30-d-kill | no | 2.1 | 10.7 | 41 | 0 | – | 0 (0) | 2295 (2580) |
+| synthetic-s2-d30-c-kill | no | 2.2 | 16.9 | 49 | -13 | 79 | 1 (0) | 3105 (2325) |
+| synthetic-s2-d30-d-kill | no | 2.1 | 4.6 | 39 | -11 | – | 1 (0) | 2340 (2625) |
+| synthetic-s3-d30-c-kill | no | 2.1 | 14.8 | 34 | -11 | 64 | 0 (0) | 3180 (2340) |
+| synthetic-s3-d30-d-kill | no | 2.2 | 2.6 | 49 | -13 | – | 2 (0) | 2295 (2550) |
+| wikipedia-s1-d30-c-kill | no | 2.1 | 12.8 | 42 | -1 | 87 | 2 (2) | 3150 (2205) |
+| wikipedia-s1-d30-d-kill | yes | 2.2 | 10.8 | 41 | 0 | – | 3 (2) | 2370 (2340) |
+| wikipedia-s2-d30-c-kill | no | 2.1 | 6.7 | 55 | -11 | 70 | 2 (2) | 2925 (1935) |
+| wikipedia-s2-d30-d-kill | yes | 2.2 | 4.7 | 52 | -13 | – | 2 (2) | 2265 (2250) |
+| wikipedia-s3-d30-c-kill | no | 2.1 | 4.7 | 56 | -9 | 71 | 2 (2) | 2955 (1980) |
+| wikipedia-s3-d30-d-kill | no | 2.2 | 4.6 | 49 | -1 | – | 2 (2) | 2130 (2190) |
+
+Modified tree: wikipedia-s1-d30-d-kill, wikipedia-s2-d30-d-kill started while another session had uncommitted documentation in the checkout (README.md and docs/ only; no file a run reads). The changed files are listed per run in experiments/results/fault/dirty-evidence-*.txt.
+
