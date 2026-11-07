@@ -1,0 +1,10 @@
+# Recorded 19:59 during fault run 4 (wikipedia-s1-d30-d-kill), git_dirty true: files that differ from 33273de, the commit the grid started from (committed + uncommitted + untracked). All documentation; none is read by a run.
+Sat Nov  7 19:59:23 CET 2026
+HEAD b6a7062f95cbb8403387320442342abc8d1685d4
+--- files changed since 33273de (committed + working tree):
+README.md
+docs/configuration.md
+docs/install/aks.md
+docs/install/eks.md
+docs/install/gke.md
+docs/local-testbed.md

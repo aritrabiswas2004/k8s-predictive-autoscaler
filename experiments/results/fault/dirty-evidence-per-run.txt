@@ -1,0 +1,36 @@
+# Recorded at the start of each fault run from run 5 on: HEAD, then the files that differ from
+# 33273de (the commit the grid started from; `git diff --name-only 33273de`, committed and
+# uncommitted) and any untracked files outside experiments/results. From run 6 on only
+# README.md is listed: that is the committed README rewrite (6d48fc9, 96fcd96) under b6a7062,
+# the replayed Phase 8 commit, and the tree was clean (run.json git_dirty false). Runs 4-5
+# also had the uncommitted docs listed here. Run 4's list is in dirty-evidence-1959.txt.
+== 20:13:11 === run 5/12: wikipedia-s2-d30-d-kill (order 4, rep 2)
+HEAD b6a7062
+README.md
+docs/configuration.md
+docs/install/aks.md
+docs/install/eks.md
+docs/install/gke.md
+docs/local-testbed.md
+== 20:40:30 === run 6/12: wikipedia-s2-d30-c-kill (order 5, rep 2)
+HEAD b6a7062
+README.md
+== 21:07:42 === run 7/12: synthetic-s2-d30-d-kill (order 6, rep 2)
+HEAD b6a7062
+README.md
+== 21:34:58 === run 8/12: synthetic-s2-d30-c-kill (order 7, rep 2)
+HEAD b6a7062
+README.md
+== 22:02:17 === run 9/12: synthetic-s3-d30-c-kill (order 8, rep 3)
+HEAD b6a7062
+README.md
+== 22:29:33 === run 10/12: synthetic-s3-d30-d-kill (order 9, rep 3)
+HEAD b6a7062
+README.md
+== 22:56:48 === run 11/12: wikipedia-s3-d30-c-kill (order 10, rep 3)
+HEAD b6a7062
+README.md
+== 23:24:11 === run 12/12: wikipedia-s3-d30-d-kill (order 11, rep 3)
+HEAD b6a7062
+README.md
+grid finished Sat Nov  7 23:51:34 CET 2026
