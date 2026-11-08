@@ -83,14 +83,15 @@ Grafana dashboards, comparing it with other autoscalers, and rerunning the bench
 
 ## How it works
 
-```
-         ┌─────────────────────────── scales ────────────────────────────┐
-         ▼                                                               │
-  traffic ──▶ your pods ── request count ──▶ Prometheus ──▶ KEDA ──▶ HPA
-                                              │      ▲
-                                     history  │      │  forecast_rps
-                                              ▼      │
-                                            forecaster
+```mermaid
+flowchart LR
+    traffic([Traffic]) --> pods[Your pods]
+    pods -- request count --> prom[(Prometheus)]
+    prom -- history --> fc[Forecaster]
+    fc -- forecast_rps --> prom
+    prom -- "forecast + request rate" --> keda[KEDA]
+    keda --> hpa[HPA]
+    hpa -- scales --> pods
 ```
 
 1. Your service exposes a request counter, and Prometheus scrapes it.
@@ -165,8 +166,11 @@ KEDA on the current request rate with 0, 20 and 40 % spare capacity (**R100**, *
   forecast-only setup (C) went to its fallback of maximum pods: no extra slow minutes, but
   40 % more pod-seconds. [Fault test write-up](docs/results.md).
 
-All results, with confidence intervals: [docs/results-tables.md](docs/results-tables.md).
-How the benchmarks work: [docs/methodology.md](docs/methodology.md).
+- **What the results mean**, the hypotheses and how they fared: [docs/results.md](docs/results.md).
+- **Every table**, with confidence intervals: [docs/results-tables.md](docs/results-tables.md).
+- **How the benchmarks work**: design, fairness controls, threats to validity:
+  [docs/methodology.md](docs/methodology.md).
+- **What went wrong along the way**: [docs/lessons-learned.md](docs/lessons-learned.md).
 
 ## Limitations
 
@@ -180,6 +184,19 @@ How the benchmarks work: [docs/methodology.md](docs/methodology.md).
 - **Where it has been tested.** The benchmarks ran on a local cluster with days compressed to
   5 minutes. The cloud install guides follow each provider's documentation and have not yet
   been run end to end on every provider.
+
+## Next steps
+
+- **Run the install guides end to end** on EKS, GKE and AKS, with real daily traffic and
+  node autoscaling, where a new pod may also wait for a node.
+- **More fault scenarios:** a Prometheus outage, and a permanent change in the traffic
+  pattern (how many days the forecast needs to adapt, and whether `ForecastInaccurate` fires).
+- **Weekly seasonality**, so weekends and holidays are forecast rather than left to the
+  request-rate trigger.
+- **Choose the bound from the error budget:** scale on the mean forecast while the SLO has
+  budget to spare, and on the upper bound when it doesn't.
+- **Package it as an operator**, so one resource per service replaces the forecaster
+  Deployment and the ScaledObject.
 
 ## Development
 
