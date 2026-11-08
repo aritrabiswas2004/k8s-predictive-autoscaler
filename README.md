@@ -83,16 +83,7 @@ Grafana dashboards, comparing it with other autoscalers, and rerunning the bench
 
 ## How it works
 
-```mermaid
-flowchart LR
-    traffic([Traffic]) --> pods[Your pods]
-    pods -- request count --> prom[(Prometheus)]
-    prom -- history --> fc[Forecaster]
-    fc -- forecast_rps --> prom
-    prom -- "forecast + request rate" --> keda[KEDA]
-    keda --> hpa[HPA]
-    hpa -- scales --> pods
-```
+![Your pods expose a request count that Prometheus scrapes; the forecaster reads its history and writes back forecast_rps; KEDA reads the forecast and the request rate, and the HPA scales your pods on whichever asks for more](docs/img/architecture.svg)
 
 1. Your service exposes a request counter, and Prometheus scrapes it.
 2. Every 30 s the forecaster reads the last three days of the request rate, forecasts the
